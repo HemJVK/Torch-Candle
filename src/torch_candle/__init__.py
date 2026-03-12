@@ -1,6 +1,11 @@
 from .tensor import Tensor
 from . import ops
-from .ops import add, sub, mul, div, matmul, sum, mean, relu, mm, cat, stack, log, exp, pow
+from .ops import (
+    add, sub, mul, div, matmul, sum, mean, relu, mm, 
+    cat, stack, log, exp, pow, view, reshape, squeeze, unsqueeze
+)
+from .device import device
+from . import cuda
 import candle
 
 def tensor(data, dtype=None, device=None, requires_grad=False):

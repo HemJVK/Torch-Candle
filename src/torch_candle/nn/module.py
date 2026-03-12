@@ -44,9 +44,9 @@ class Module:
     def eval(self):
         return self.train(False)
 
-    def to(self, device):
+    def to(self, *args, **kwargs):
         for param in self.parameters():
-            param._tensor = param._tensor.to_device(device)
+            param._tensor = param.to(*args, **kwargs)._tensor
         for module in self._modules.values():
-            module.to(device)
+            module.to(*args, **kwargs)
         return self

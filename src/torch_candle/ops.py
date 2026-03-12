@@ -4,75 +4,83 @@ import candle
 def add(input, other, out=None):
     if out is not None:
         raise NotImplementedError("out= parameter not supported yet")
-    input_tensor = input._tensor if isinstance(input, Tensor) else input
-    other_tensor = other._tensor if isinstance(other, Tensor) else other
-    return Tensor(input_tensor + other_tensor)
+    if not isinstance(input, Tensor):
+        input = Tensor(input)
+    return input + other
 
 def sub(input, other, out=None):
     if out is not None:
         raise NotImplementedError("out= parameter not supported yet")
-    input_tensor = input._tensor if isinstance(input, Tensor) else input
-    other_tensor = other._tensor if isinstance(other, Tensor) else other
-    return Tensor(input_tensor - other_tensor)
+    if not isinstance(input, Tensor):
+        input = Tensor(input)
+    return input - other
 
 def mul(input, other, out=None):
     if out is not None:
         raise NotImplementedError("out= parameter not supported yet")
-    input_tensor = input._tensor if isinstance(input, Tensor) else input
-    other_tensor = other._tensor if isinstance(other, Tensor) else other
-    return Tensor(input_tensor * other_tensor)
+    if not isinstance(input, Tensor):
+        input = Tensor(input)
+    return input * other
 
 def div(input, other, out=None):
     if out is not None:
         raise NotImplementedError("out= parameter not supported yet")
-    input_tensor = input._tensor if isinstance(input, Tensor) else input
-    other_tensor = other._tensor if isinstance(other, Tensor) else other
-    return Tensor(input_tensor / other_tensor)
+    if not isinstance(input, Tensor):
+        input = Tensor(input)
+    return input / other
 
 def matmul(input, other, out=None):
     if out is not None:
         raise NotImplementedError("out= parameter not supported yet")
-    return Tensor(input._tensor.matmul(other._tensor))
-
-def sum(input, dim=None, keepdim=False):
-    if dim is None:
-        return Tensor(input._tensor.sum_all())
-    else:
-        # Candle sum_keepdim or sum
-        if keepdim:
-            return Tensor(input._tensor.sum_keepdim(dim))
-        else:
-            t = input._tensor.sum_keepdim(dim)
-            return Tensor(t.squeeze(dim))
-
-def mean(input, dim=None, keepdim=False):
-    if dim is None:
-        return Tensor(input._tensor.mean_all())
-    else:
-        # candle might not have mean_keepdim directly, compute as sum / size
-        s = sum(input, dim=dim, keepdim=keepdim)
-        size = input.shape[dim]
-        return s / size
-
-def relu(input):
-    return Tensor(input._tensor.broadcast_maximum(candle.Tensor(0.0).to_device(input.device).to_dtype(input.dtype)))
+    return input.matmul(other)
 
 def mm(input, other):
-    return matmul(input, other)
+    return input.matmul(other)
 
-def cat(tensors, dim=0):
+def sum(input, dim=None, keepdim=False):
+    return input.sum(dim=dim, keepdim=keepdim)
+
+def mean(input, dim=None, keepdim=False):
+    return input.mean(dim=dim, keepdim=keepdim)
+
+def relu(input):
+    return input.relu()
+
+def cat(tensors, dim=0, out=None):
+    if out is not None:
+        raise NotImplementedError("out= parameter not supported yet")
     candle_tensors = [t._tensor for t in tensors]
     return Tensor(candle.cat(candle_tensors, dim))
 
-def stack(tensors, dim=0):
+def stack(tensors, dim=0, out=None):
+    if out is not None:
+        raise NotImplementedError("out= parameter not supported yet")
     candle_tensors = [t._tensor for t in tensors]
     return Tensor(candle.stack(candle_tensors, dim))
 
-def log(input):
-    return Tensor(input._tensor.log())
+def log(input, out=None):
+    if out is not None:
+        raise NotImplementedError("out= parameter not supported yet")
+    return input.log()
 
-def exp(input):
-    return Tensor(input._tensor.exp())
+def exp(input, out=None):
+    if out is not None:
+        raise NotImplementedError("out= parameter not supported yet")
+    return input.exp()
 
-def pow(input, exponent):
+def pow(input, exponent, out=None):
+    if out is not None:
+        raise NotImplementedError("out= parameter not supported yet")
     return Tensor(input._tensor.powf(exponent))
+
+def view(input, *shape):
+    return input.view(*shape)
+
+def reshape(input, *shape):
+    return input.reshape(*shape)
+
+def squeeze(input, dim=None):
+    return input.squeeze(dim)
+
+def unsqueeze(input, dim):
+    return input.unsqueeze(dim)
