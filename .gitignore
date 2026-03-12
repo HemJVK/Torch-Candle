@@ -1,2 +1,14 @@
+<<<<<<< HEAD
 .venv
 __pycache__
+=======
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+build/
+dist/
+*.egg-info/
+.idea/
+.vscode/
+>>>>>>> e2e3835 (Initial implementation of Torch-Candle: Core Tensor, NN modules, and SGD optimizer)
