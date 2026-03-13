@@ -1,6 +1,8 @@
 class Optimizer:
     def __init__(self, params, defaults):
+        from collections import defaultdict
         self.defaults = defaults
+        self.state = defaultdict(dict)
         # params can be an iterator of Parameters
         self.param_groups = []
         param_group = {'params': list(params)}

@@ -100,7 +100,9 @@ class Categorical(Distribution):
     def sample(self, sample_shape=()):
         n = self.probs.shape[-1]
         shape = tuple(sample_shape)
-        indices = np.array([np.random.choice(n, p=self.probs.flatten()) for _ in range(max(1, int(np.prod(shape))))]).reshape(shape or (1,))
+        p_flat = self.probs.flatten()
+        p_flat /= p_flat.sum() # Ensure exact sum to 1.0
+        indices = np.array([np.random.choice(n, p=p_flat) for _ in range(max(1, int(np.prod(shape))))]).reshape(shape or (1,))
         return _w(indices.astype(np.int64))
 
     def log_prob(self, value):
@@ -194,7 +196,7 @@ class Dirichlet(Distribution):
         return _w(np.random.dirichlet(self.concentration, shape).astype(np.float32))
 
     def mean(self):
-        return _w(self.concentration / self.concentration.sum(-1, keepdims=True))
+        return _w(self.concentration / np.sum(self.concentration, axis=-1, keepdims=True))
 
 
 class Beta(Distribution):

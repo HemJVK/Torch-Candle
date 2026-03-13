@@ -226,8 +226,9 @@ def gelu(input, approximate='none'):
     if approximate == 'tanh':
         out = 0.5 * x * (1 + np.tanh(_math.sqrt(2.0 / _math.pi) * (x + 0.044715 * x**3)))
     else:
-        from scipy.special import erf
-        out = 0.5 * x * (1 + erf(x / _math.sqrt(2.0)))
+        # Use Python's math.erf for accuracy
+        _erf_vec = np.vectorize(_math.erf)
+        out = 0.5 * x * (1 + _erf_vec(x / _math.sqrt(2.0)))
     return Tensor(out.astype(np.float32))
 
 def silu(input, inplace=False):
@@ -322,8 +323,10 @@ def batch_norm(input, running_mean, running_var, weight=None, bias=None,
         if running_mean is not None:
             rm = running_mean.numpy()
             rv = running_var.numpy()
-            rm[:] = (1 - momentum) * rm + momentum * mean.squeeze()
-            rv[:] = (1 - momentum) * rv + momentum * var.squeeze()
+            rm_new = (1 - momentum) * rm + momentum * mean.squeeze()
+            rv_new = (1 - momentum) * rv + momentum * var.squeeze()
+            running_mean._tensor = Tensor(rm_new.astype(np.float32))._tensor
+            running_var._tensor = Tensor(rv_new.astype(np.float32))._tensor
     else:
         mean = running_mean.numpy().reshape((1, -1) + (1,) * (x.ndim - 2))
         var = running_var.numpy().reshape((1, -1) + (1,) * (x.ndim - 2))

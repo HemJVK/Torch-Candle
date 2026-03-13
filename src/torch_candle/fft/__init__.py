@@ -3,7 +3,7 @@ import numpy as np
 from ..tensor import Tensor
 
 def _t(x): return x.numpy() if isinstance(x, Tensor) else np.array(x, dtype=np.float32)
-def _w(x): return Tensor(np.array(x, dtype=np.complex64 if np.iscomplexobj(x) else np.float32))
+def _w(x): return Tensor(np.array(x, dtype=np.complex64 if np.iscomplexobj(x) else np.float32).real.astype(np.float32))
 
 
 def fft(input, n=None, dim=-1, norm=None):

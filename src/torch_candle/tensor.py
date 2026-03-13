@@ -11,10 +11,12 @@ class Tensor:
     def __init__(self, data, dtype=None, device=None, requires_grad=False):
         if candle is not None and isinstance(data, candle.Tensor):
             self._tensor = data
-        elif isinstance(data, (list, tuple, np.ndarray, float, int)):
+        elif isinstance(data, (list, tuple, np.ndarray, float, int, np.generic)):
             if candle is None: raise ImportError("candle not found")
             # Unified approach for candle 0.2.1: convert to flat list + reshape
             arr = np.array(data)
+            if np.iscomplexobj(arr):
+                arr = arr.real.astype(np.float32)
             shape = arr.shape
             flat_data = arr.flatten().tolist()
             if candle is not None:
@@ -258,12 +260,18 @@ class Tensor:
         if dim is None:
             res_data = self._tensor.sum_all()
         else:
-            res_data = self._tensor.sum_keepdim(dim)
+            ndim = len(self.shape)
+            if isinstance(dim, int):
+                dim_norm = dim if dim >= 0 else dim + ndim
+                dim_seq = [dim_norm]
+            else:
+                dim_seq = [(d if d >= 0 else d + ndim) for d in dim]
+            res_data = self._tensor.sum_keepdim(dim_seq)
             if not keepdim:
                 if isinstance(dim, int):
-                    res_data = res_data.squeeze(dim)
+                    res_data = res_data.squeeze(dim_norm)
                 else:
-                    for d in sorted(dim, reverse=True):
+                    for d in sorted(dim_seq, reverse=True):
                         res_data = res_data.squeeze(d)
         
         out = Tensor(res_data)
@@ -382,7 +390,11 @@ class Tensor:
         try:
             return np.array(self._tensor.to_torch().numpy())
         except:
-            return np.array(self._tensor.values())
+            # Pyo3 limit: values() only implemented up to rank 3
+            # So we flatten to 1D, get values, then reshape in numpy
+            shape = tuple(self.shape)
+            flat = self._tensor.flatten_all()
+            return np.array(flat.values()).reshape(shape)
 
     def item(self):
         n = self.numpy()

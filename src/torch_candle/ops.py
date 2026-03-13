@@ -9,10 +9,8 @@ from typing import Optional, Union, Sequence, List, Tuple
 
 try:
     import candle
-    from candle import functional as candle_F
 except ImportError:
     candle = None
-    candle_F = None
 
 import numpy as np
 import math
@@ -221,12 +219,21 @@ def lerp(input, end, weight):
     return _wrap(input) + (_wrap(end) - _wrap(input)) * weight
 
 def erf(input, out=None):
-    from scipy.special import erf as sp_erf
-    return Tensor(sp_erf(_wrap(input).numpy()).astype(np.float32))
+    # Approximation of error function using tanh
+    # erf(x) ≈ tanh( (2/sqrt(pi)) * (x + 0.111x^3) )
+    x = _wrap(input).numpy()
+    approx = np.tanh( (2.0 / np.sqrt(np.pi)) * (x + 0.111 * x**3) )
+    return Tensor(approx.astype(np.float32))
 
 def erfinv(input):
-    from scipy.special import erfinv as sp_erfinv
-    return Tensor(sp_erfinv(_wrap(input).numpy()).astype(np.float32))
+    # Approximation of inverse error function
+    x = _wrap(input).numpy()
+    # using a simple approximation or pseudo-inverse: avoiding scipy
+    a = 8.0 * (np.pi - 3.0) / (3.0 * np.pi * (4.0 - np.pi))
+    ln_1_x2 = np.log(1.0 - x**2 + 1e-7)
+    term1 = 2.0 / (np.pi * a) + ln_1_x2 / 2.0
+    approx = np.sign(x) * np.sqrt(np.sqrt(term1**2 - ln_1_x2 / a) - term1)
+    return Tensor(approx.astype(np.float32))
 
 # ============================================================
 # LOGICAL OPS

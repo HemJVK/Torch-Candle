@@ -10,7 +10,7 @@ class Adagrad(Optimizer):
         super().__init__(params, defaults)
         for group in self.param_groups:
             for p in group['params']:
-                state = self.state[id(p)]
+                state = self.state[p]
                 state['step'] = 0
                 state['sum'] = np.full(p.shape, initial_accumulator_value, dtype=np.float32)
 
@@ -23,7 +23,7 @@ class Adagrad(Optimizer):
                 if p.grad is None: continue
                 from ..tensor import Tensor
                 grad = p.grad.numpy() if isinstance(p.grad, Tensor) else np.array(p.grad)
-                state = self.state[id(p)]
+                state = self.state[p]
                 state['step'] += 1
                 if wd != 0:
                     grad = grad + wd * p.numpy()
