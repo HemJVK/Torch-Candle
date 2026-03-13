@@ -1,0 +1,12 @@
+{
+  "source_directories": [
+    "src"
+  ],
+  "search_path": [
+    "src",
+    "/home/hem/personal/Library/Torch-Candle/.venv/lib/python3.10/site-packages"
+  ],
+  "exclude": [
+    ".*/venv/.*"
+  ]
+}

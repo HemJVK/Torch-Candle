@@ -1,4 +1,7 @@
-import candle
+try:
+    import candle
+except ImportError:
+    candle = None
 
 class device:
     def __init__(self, type, index=None):

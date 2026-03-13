@@ -1,5 +1,6 @@
 from .module import Module
 from .. import ops
+import numpy as np
 
 class _Loss(Module):
     def __init__(self, size_average=None, reduce=None, reduction='mean'):
@@ -14,7 +15,8 @@ class MSELoss(_Loss):
         diff = input - target
         loss = diff * diff
         if self.reduction == 'mean':
-            return loss.mean()
+            num_elements = input._tensor.nelements if hasattr(input._tensor, 'nelements') else np.prod(input.shape)
+            return loss.sum() * (1.0 / num_elements)
         elif self.reduction == 'sum':
             return loss.sum()
         return loss

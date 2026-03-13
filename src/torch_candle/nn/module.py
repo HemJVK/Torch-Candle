@@ -14,6 +14,15 @@ class Module:
             self._modules[name] = value
         super().__setattr__(name, value)
 
+    def register_parameter(self, name, param):
+        if param is None:
+            self._parameters[name] = None
+        elif not isinstance(param, Parameter):
+            raise TypeError(f"cannot register {type(param)} as parameter")
+        else:
+            self._parameters[name] = param
+        super().__setattr__(name, param)
+
     def parameters(self, recurse=True):
         for name, param in self._parameters.items():
             yield param

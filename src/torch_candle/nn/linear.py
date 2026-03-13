@@ -9,18 +9,16 @@ class Linear(Module):
         self.in_features = in_features
         self.out_features = out_features
         
-        # Initialize weights matching PyTorch's kaiming_uniform_
-        # For simplicity, using a uniform distribution here
-        k = 1.0 / math.sqrt(in_features)
+        # Use our own factory methods
+        from .. import randn, zeros
+        k = math.sqrt(1.0 / in_features)
         
-        # Use ones/randn and then scale
-        # Candle doesn't have uniform easily, let's use randn for now or just scale rand
-        import candle
-        w_data = candle.randn((out_features, in_features)) * k
+        # Initialize weights and scale
+        w_data = (randn(out_features, in_features) * (2 * k)) - k
         self.weight = Parameter(w_data)
         
         if bias:
-            b_data = candle.randn((out_features,)) * k
+            b_data = (randn(out_features) * (2 * k)) - k
             self.bias = Parameter(b_data)
         else:
             self.register_parameter('bias', None)
