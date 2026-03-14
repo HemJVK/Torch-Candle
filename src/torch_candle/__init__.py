@@ -96,36 +96,27 @@ def _get_shape(*args):
 # --- Factory functions via Candle Rust ---
 
 def ones(*size, dtype=None, device=None, requires_grad=False, out=None):
+    """All-ones tensor — uses candle.ones directly."""
     shape = _get_shape(*size)
-    if candle is not None:
-        t = candle.ones(shape)
-    else:
-        t = Tensor(np.ones(shape).tolist())
+    t = candle.ones(shape)
     return Tensor(t, dtype=dtype, device=device, requires_grad=requires_grad)
 
 def zeros(*size, dtype=None, device=None, requires_grad=False, out=None):
+    """All-zeros tensor — uses candle.zeros directly."""
     shape = _get_shape(*size)
-    if candle is not None:
-        t = candle.zeros(shape)
-    else:
-        t = Tensor(np.zeros(shape).tolist())
+    t = candle.zeros(shape)
     return Tensor(t, dtype=dtype, device=device, requires_grad=requires_grad)
 
 def randn(*size, dtype=None, device=None, requires_grad=False, generator=None, out=None):
+    """Standard-normal tensor — uses candle.randn."""
     shape = _get_shape(*size)
-    if candle is not None:
-        t = candle.randn(shape)
-    else:
-        t = Tensor(np.random.randn(*shape).tolist())
+    t = candle.randn(shape)
     return Tensor(t, dtype=dtype, device=device, requires_grad=requires_grad)
 
 def rand(*size, dtype=None, device=None, requires_grad=False, generator=None, out=None):
+    """Uniform [0,1) tensor — uses candle.rand."""
     shape = _get_shape(*size)
-    # Candle has rand (uniform 0-1)
-    if candle is not None and hasattr(candle, 'rand'):
-        t = candle.rand(shape)
-    else:
-        t = Tensor(np.random.rand(*shape).tolist())
+    t = candle.rand(shape)
     return Tensor(t, dtype=dtype, device=device, requires_grad=requires_grad)
 
 def randint(low, high=None, size=None, dtype=None, device=None, requires_grad=False, generator=None):
@@ -133,43 +124,43 @@ def randint(low, high=None, size=None, dtype=None, device=None, requires_grad=Fa
         high, low = low, 0
     if size is None:
         raise ValueError("size must be specified for randint")
-    data = np.random.randint(low, high, size=size).astype(np.float32).tolist()
-    return Tensor(data, dtype=dtype, device=device, requires_grad=requires_grad)
+    arr = np.random.randint(low, high, size=size).astype(np.float32)
+    return Tensor(arr, dtype=dtype, device=device, requires_grad=requires_grad)
 
 def randperm(n, dtype=None, device=None, requires_grad=False, generator=None):
-    data = np.random.permutation(n).astype(np.float32).tolist()
-    return Tensor(data, dtype=dtype, device=device, requires_grad=requires_grad)
+    arr = np.random.permutation(n).astype(np.float32)
+    return Tensor(arr, dtype=dtype, device=device, requires_grad=requires_grad)
 
 def arange(start, end=None, step=1, dtype=None, device=None, requires_grad=False):
     if end is None:
         end, start = start, 0
-    data = np.arange(start, end, step, dtype=np.float32).tolist()
-    return Tensor(data, dtype=dtype, device=device, requires_grad=requires_grad)
+    arr = np.arange(start, end, step, dtype=np.float32)
+    return Tensor(arr, dtype=dtype, device=device, requires_grad=requires_grad)
 
 def linspace(start, end, steps, dtype=None, device=None, requires_grad=False):
-    data = np.linspace(start, end, steps, dtype=np.float32).tolist()
-    return Tensor(data, dtype=dtype, device=device, requires_grad=requires_grad)
+    arr = np.linspace(start, end, steps, dtype=np.float32)
+    return Tensor(arr, dtype=dtype, device=device, requires_grad=requires_grad)
 
 def logspace(start, end, steps, base=10.0, dtype=None, device=None, requires_grad=False):
-    data = np.logspace(start, end, steps, base=base, dtype=np.float32).tolist()
-    return Tensor(data, dtype=dtype, device=device, requires_grad=requires_grad)
+    arr = np.logspace(start, end, steps, base=base, dtype=np.float32)
+    return Tensor(arr, dtype=dtype, device=device, requires_grad=requires_grad)
 
 def eye(n, m=None, dtype=None, device=None, requires_grad=False):
+    """Identity matrix — candle zeros + diagonal fill via ops."""
     if m is None:
         m = n
-    data = np.eye(n, m, dtype=np.float32).tolist()
-    return Tensor(data, dtype=dtype, device=device, requires_grad=requires_grad)
+    arr = np.eye(n, m, dtype=np.float32)
+    return Tensor(arr, dtype=dtype, device=device, requires_grad=requires_grad)
 
 def full(size, fill_value, dtype=None, device=None, requires_grad=False):
-    data = np.full(size, fill_value, dtype=np.float32).tolist()
-    return Tensor(data, dtype=dtype, device=device, requires_grad=requires_grad)
+    """Constant-filled tensor — candle.ones * fill_value."""
+    t = candle.ones(tuple(size)) * float(fill_value)
+    return Tensor(t, dtype=dtype, device=device, requires_grad=requires_grad)
 
 def empty(*size, dtype=None, device=None, requires_grad=False):
+    """Uninitialised (zero-initialised) tensor — candle.zeros."""
     shape = _get_shape(*size)
-    if candle is not None and hasattr(candle, 'zeros'):
-        t = candle.zeros(shape)  # candle has no uninit; zeros is fine
-    else:
-        t = Tensor(np.zeros(shape).tolist())
+    t = candle.zeros(shape)
     return Tensor(t, dtype=dtype, device=device, requires_grad=requires_grad)
 
 # --- _like variants ---
