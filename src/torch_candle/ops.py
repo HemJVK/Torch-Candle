@@ -10,14 +10,11 @@ from __future__ import annotations
 from typing import Optional, Union, Sequence, List, Tuple
 import builtins as _builtins
 
-import candle
 import numpy as np
 import math
 
 from .tensor import Tensor
-
-_f32 = candle.f32
-_u8  = candle.u8
+import torch_candle_backend as _kernels
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -38,11 +35,11 @@ def _np(t: Tensor) -> np.ndarray:
 
 
 def _ones_raw(shape, device, dtype):
-    return candle.ones(shape).to_device(device).to_dtype(dtype)
+    return _kernels.PyTensor.ones(shape, device=device, dtype=dtype)
 
 
 def _zeros_raw(shape, device, dtype):
-    return candle.zeros(shape).to_device(device).to_dtype(dtype)
+    return _kernels.PyTensor.zeros(shape, device=device, dtype=dtype)
 
 
 # ─── ARITHMETIC / POINTWISE ──────────────────────────────────────────────────
@@ -111,7 +108,7 @@ def pow(input, exponent, out=None):
 
 
 def exp(input, out=None):
-    return _wrap(input).exp()
+    return Tensor(np.exp(_np(_wrap(input))).astype(np.float32))
 
 
 def exp2(input, out=None):
@@ -119,7 +116,7 @@ def exp2(input, out=None):
 
 
 def log(input, out=None):
-    return _wrap(input).log()
+    return Tensor(np.log(_np(_wrap(input))).astype(np.float32))
 
 
 def log2(input, out=None):
@@ -135,7 +132,7 @@ def log1p(input, out=None):
 
 
 def sqrt(input, out=None):
-    return _wrap(input).sqrt()
+    return Tensor(np.sqrt(_np(_wrap(input))).astype(np.float32))
 
 
 def rsqrt(input, out=None):
@@ -147,8 +144,7 @@ def reciprocal(input, out=None):
 
 
 def abs(input, out=None):
-    """Pure candle: sqrt(sqr(x))."""
-    return _wrap(input).abs()
+    return Tensor(np.abs(_np(_wrap(input))).astype(np.float32))
 
 
 absolute = abs
@@ -156,7 +152,7 @@ absolute = abs
 
 def neg(input, out=None):
     """Pure candle: x * -1."""
-    return _wrap(input).neg()
+    return -_wrap(input)
 
 
 def sign(input, out=None):
@@ -256,7 +252,8 @@ def atanh(input, out=None):        # numpy fallback
 # ─── Activations ─────────────────────────────────────────────────────────────
 
 def sigmoid(input, out=None):
-    return _wrap(input).sigmoid()
+    res = 1.0 / (1.0 + np.exp(-_np(_wrap(input))))
+    return Tensor(np.array(res).astype(np.float32))
 
 
 def relu(input):
@@ -266,7 +263,7 @@ def relu(input):
 # ─── clamp ───────────────────────────────────────────────────────────────────
 
 def clamp(input, min=None, max=None, out=None):
-    return _wrap(input).clamp(min=min, max=max)
+    return Tensor(np.clip(_np(_wrap(input)), min, max).astype(np.float32))
 
 
 clip = clamp
@@ -288,8 +285,8 @@ def lerp(input, end, weight):
 def erf(input, out=None):
     # numpy fallback — no candle equivalent
     x   = _np(_wrap(input))
-    approx = np.tanh((2.0 / np.sqrt(np.pi)) * (x + 0.111 * x**3))
-    return Tensor(approx.astype(np.float32))
+    erf_vec = np.vectorize(math.erf)
+    return Tensor(erf_vec(x).astype(np.float32))
 
 
 def erfinv(input):               # numpy fallback
@@ -529,18 +526,18 @@ def sort(input, dim=-1, descending=False, stable=False, out=None):  # numpy fall
 # ─── INDEXING, JOINING, MUTATING ─────────────────────────────────────────────
 
 def cat(tensors, dim=0, out=None):
-    raw = [t._tensor if isinstance(t, Tensor) else t for t in tensors]
+    raw = [_raw(t) for t in tensors]
     try:
-        return Tensor(candle.cat(raw, dim))
+        return Tensor(_kernels.PyTensor.cat(raw, dim))
     except Exception:
         arrs = [_np(_wrap(t)) for t in tensors]
         return Tensor(np.concatenate(arrs, axis=dim).astype(np.float32))
 
 
 def stack(tensors, dim=0, out=None):
-    raw = [t._tensor if isinstance(t, Tensor) else t for t in tensors]
+    raw = [_raw(t) for t in tensors]
     try:
-        return Tensor(candle.stack(raw, dim))
+        return Tensor(_kernels.PyTensor.stack(raw, dim))
     except Exception:
         arrs = [_np(_wrap(t)) for t in tensors]
         return Tensor(np.stack(arrs, axis=dim).astype(np.float32))
@@ -607,23 +604,24 @@ def index_select(input, dim, index, out=None):
     """Use candle-native index_select."""
     t   = _wrap(input)
     idx = _wrap(index)
-    return Tensor(t._tensor.index_select(_raw(idx).to_dtype(candle.u32), dim))
+    # Ensure index is uint32 for candle
+    idx_u32 = idx._tensor.to_dtype("uint32")
+    return Tensor(t._tensor.index_select(idx_u32, dim))
 
 
 def where(condition, input=None, other=None):
     cond = _wrap(condition)
     if input is None:
         return Tensor(np.argwhere(_np(cond).astype(bool)).astype(np.float32))
-    a_raw = _raw(_wrap(input))  if isinstance(input, Tensor) else input
-    b_raw = _raw(_wrap(other))  if isinstance(other, Tensor) else other
-    # Build u8 mask from cond (0./1. float → u8)
-    cond_u8 = cond._tensor.to_dtype(_u8)
-    # Ensure a_raw and b_raw are candle tensors
-    if not isinstance(a_raw, candle.Tensor):
-        a_raw = candle.ones(cond.shape).to_device(cond.device).to_dtype(cond.dtype) * float(a_raw)
-    if not isinstance(b_raw, candle.Tensor):
-        b_raw = candle.ones(cond.shape).to_device(cond.device).to_dtype(cond.dtype) * float(b_raw)
-    return Tensor(cond_u8.where_cond(a_raw, b_raw))
+    a = _wrap(input)
+    b = _wrap(other)
+    try:
+        # candle where_cond needs u32
+        c = cond._tensor.to_dtype("uint32")
+        return Tensor(c.where_cond(a._tensor, b._tensor))
+    except Exception:
+        # numpy fallback
+        return Tensor(np.where(_np(cond).astype(bool), _np(a), _np(b)).astype(np.float32))
 
 
 def masked_select(input, mask, out=None):  # numpy fallback
@@ -696,15 +694,12 @@ def clone(input, memory_format=None):
 
 
 def detach(input):
-    t   = _wrap(input)
-    out = Tensor(t._tensor)
-    out.requires_grad = False
-    out.grad_fn       = None
-    return out
+    return _wrap(input).detach()
 
 
 def contiguous(input):
-    return Tensor(_raw(_wrap(input)).contiguous())
+    # PyTensor contiguous is a no-op currently but exposed for API
+    return Tensor(_raw(_wrap(input)).clone())
 
 
 def type_as(input, other):

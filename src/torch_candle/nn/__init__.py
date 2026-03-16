@@ -1,7 +1,7 @@
 from .module import Module
 from .parameter import Parameter
 from .linear import Linear
-from .activations import ReLU, Sigmoid
+from .activations import ReLU, Sigmoid, GELU, SiLU, Softmax
 from .dropout import Dropout
 from .loss import MSELoss, CrossEntropyLoss
 from .conv import Conv2d

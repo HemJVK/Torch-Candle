@@ -24,7 +24,10 @@ class Linear(Module):
             self.register_parameter('bias', None)
 
     def forward(self, input):
-        return ops.mm(input, self.weight.t()) + self.bias
+        res = ops.mm(input, self.weight.t())
+        if self.bias is not None:
+            res = res + self.bias
+        return res
 
     def __repr__(self):
         return f"Linear(in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None})"

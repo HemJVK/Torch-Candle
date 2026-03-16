@@ -1,7 +1,4 @@
-try:
-    import candle
-except ImportError:
-    candle = None
+# torch_candle.device — Device utility class.
 
 class device:
     def __init__(self, type, index=None):

@@ -10,7 +10,7 @@ from __future__ import annotations
 import math as _math
 import numpy as np
 
-import candle
+import torch_candle_backend as _kernels
 
 from ..tensor import Tensor
 from .. import ops
@@ -18,7 +18,7 @@ from .. import ops
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
 def _raw(t):
-    return t._tensor if isinstance(t, Tensor) else t
+    return t._tensor if hasattr(t, '_tensor') else t
 
 
 def _np(t):
@@ -49,12 +49,12 @@ def tanh(input):
 def softmax(input, dim=None, dtype=None):
     if dim is None:
         dim = -1
-    if hasattr(input._tensor, 'softmax'):
-        return Tensor(input._tensor.softmax(dim))
-    # Manual stable softmax via candle ops — no numpy
-    x_max = Tensor(input._tensor.max_keepdim(dim))   # keepdim result
+    raw = _raw(input)
+    if hasattr(raw, 'softmax'):
+        return input._fast_wrap(raw.softmax(dim))
+    x_max = input.max_keepdim(dim)
     shifted = input - x_max
-    exp_x   = shifted.exp()
+    exp_x = shifted.exp()
     sum_exp = exp_x.sum(dim=dim, keepdim=True)
     return exp_x / sum_exp
 
@@ -62,61 +62,50 @@ def softmax(input, dim=None, dtype=None):
 def log_softmax(input, dim=None, dtype=None):
     if dim is None:
         dim = -1
-    if hasattr(input._tensor, 'log_softmax'):
-        return Tensor(input._tensor.log_softmax(dim))
-    # Manual: x - log(sum(exp(x))) — numerically stable via logsumexp
-    x_max   = input.max_keepdim(dim)
+    raw = _raw(input)
+    if hasattr(raw, 'log_softmax'):
+        return input._fast_wrap(raw.log_softmax(dim))
+    x_max = input.max_keepdim(dim)
     shifted = input - x_max
     return shifted - (shifted.exp().sum(dim=dim, keepdim=True).log())
 
 
 def gelu(input, approximate='none'):
-    """GELU — exact erf mode (default) or tanh approximation.
-
-    • approximate='none'  → 0.5*x*(1+erf(x/√2))  exact, matches PyTorch
-    • approximate='tanh'  → tanh approximation, pure candle
-    """
+    if input.requires_grad:
+        from ..autograd import GELU
+        return GELU.apply(input, approximate)
+    
     if approximate == 'tanh':
-        # Tanh approximation — 100% candle, no numpy
-        c     = _math.sqrt(2.0 / _math.pi)
-        x3    = input * input * input
+        c = 0.7978845608 # sqrt(2/pi)
+        x3 = input * input * input
         inner = (input + x3 * 0.044715) * c
-        ones  = Tensor(candle.ones(input.shape).to_device(input.device).to_dtype(input.dtype))
-        return input * (inner.tanh() + ones) * 0.5
+        return input * (inner.tanh() + 1.0) * 0.5
     else:
-        # Exact erf formula — erf needs numpy (no candle equivalent)
-        # Only one numpy round-trip for the erf computation
-        x_np  = _np(input)
-        erf_x = np.vectorize(_math.erf)(x_np / _math.sqrt(2.0))
-        return Tensor((0.5 * x_np * (1.0 + erf_x)).astype(np.float32))
+        # Native ops.erf
+        erf_x = ops.erf(input / 1.4142135623) # sqrt(2)
+        return input * 0.5 * (1.0 + erf_x)
 
 
 def silu(input, inplace=False):
-    """SiLU = x * sigmoid(x) — pure candle."""
+    if input.requires_grad:
+        from ..autograd import SiLU
+        return SiLU.apply(input)
+    
     return input * input.sigmoid()
 
 
 def mish(input, inplace=False):
     """Mish = x * tanh(softplus(x)) = x * tanh(log(1 + exp(x))) — pure candle."""
-    return input * (input.exp() + Tensor(
-        candle.ones(input.shape).to_device(input.device).to_dtype(input.dtype)
-    )).log().tanh()
+    return input * (input.exp() + 1.0).log().tanh()
 
 
 def elu(input, alpha=1.0, inplace=False):
-    """ELU: x if x≥0 else alpha*(exp(x)-1) — candle relu + arithmetic."""
+    """ELU: x if x≥0 else alpha*(exp(x)-1)."""
     pos    = input.relu()
-    neg_   = -(input.relu() - input)          # x when x<0, else 0  (-min(0,x))
-    # exp(neg_part) - 1; neg_part = min(0, x)
-    min_x  = neg_ * -1.0   # = min(0, x) rewritten as −pos_of_neg_x
-    # Actually simpler: elu(x) = relu(x) + min(0, alpha*(exp(x)-1))
-    # = relu(x) + alpha*(exp(x)-1) - relu(alpha*(exp(x)-1))
-    ones   = Tensor(candle.ones(input.shape).to_device(input.device).to_dtype(input.dtype))
-    exp_x  = input.exp()
-    neg_branch = (exp_x - ones) * alpha
-    # For x>=0, exp(x)-1 >=0 so relu wipes it. For x<0, exp(x)-1 <0 so relu=0.
-    pos_branch = neg_branch.relu()
-    return pos + neg_branch - pos_branch
+    # Mask for x < 0
+    mask   = (input < 0.0)
+    neg_branch = (input.exp() - 1.0) * alpha
+    return pos + mask * neg_branch
 
 
 def selu(input, inplace=False):
@@ -145,16 +134,15 @@ def hardtanh(input, min_val=-1.0, max_val=1.0, inplace=False):
 
 
 def hardswish(input, inplace=False):
-    """hardswish(x) = x * relu6(x+3) / 6 — pure candle."""
-    shifted = input + Tensor(candle.ones(input.shape).to_device(input.device).to_dtype(input.dtype)) * 3.0
+    """hardswish(x) = x * relu6(x+3) / 6."""
+    shifted = input + 3.0
     relu6   = shifted.clamp(min=0.0, max=6.0)
     return input * relu6 * (1.0 / 6.0)
 
 
 def hardsigmoid(input, inplace=False):
-    """hardsigmoid(x) = clip(x/6 + 0.5, 0, 1) — pure candle."""
-    ones = Tensor(candle.ones(input.shape).to_device(input.device).to_dtype(input.dtype))
-    return (input * (1.0 / 6.0) + ones * 0.5).clamp(min=0.0, max=1.0)
+    """hardsigmoid(x) = clip(x/6 + 0.5, 0, 1)."""
+    return (input * (1.0 / 6.0) + 0.5).clamp(min=0.0, max=1.0)
 
 
 def hardshrink(input, lambd=0.5):   # numpy fallback
@@ -168,23 +156,16 @@ def softshrink(input, lambd=0.5):    # numpy fallback
 
 
 def softplus(input, beta=1, threshold=20):
-    """softplus = (1/beta)*log(1 + exp(beta*x)) — pure candle."""
+    """softplus = (1/beta)*log(1 + exp(beta*x))."""
     beta_x  = input * float(beta)
-    # Numerically stable: threshold above which we return x
-    sp_raw  = (beta_x.exp() + Tensor(
-        candle.ones(input.shape).to_device(input.device).to_dtype(input.dtype)
-    )).log() * (1.0 / beta)
-    # For large x, just return x (avoid exp overflow)
-    cond    = (beta_x > Tensor(
-        candle.ones(input.shape).to_device(input.device).to_dtype(input.dtype) * threshold
-    ))
+    sp_raw  = (beta_x.exp() + 1.0).log() * (1.0 / beta)
+    cond    = (beta_x > threshold)
     return ops.where(cond, input, sp_raw)
 
 
 def softsign(input):
-    """softsign(x) = x / (1 + |x|) — pure candle."""
-    ones = Tensor(candle.ones(input.shape).to_device(input.device).to_dtype(input.dtype))
-    return input / (ones + input.abs())
+    """softsign(x) = x / (1 + |x|)."""
+    return input / (1.0 + input.abs())
 
 
 def tanhshrink(input):
@@ -225,7 +206,7 @@ def linear(input, weight, bias=None):
 # ─── CONVOLUTION ─────────────────────────────────────────────────────────────
 
 def conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
-    """conv2d via candle narrow + matmul — zero python loops over candle data."""
+    """conv2d via candle narrow + matmul."""
     if isinstance(stride, int):   stride  = (stride, stride)
     if isinstance(padding, int):  padding = (padding, padding)
 
@@ -233,13 +214,13 @@ def conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
         pH, pW = padding
         N, C, H, W = input.shape
         if pH > 0:
-            top    = Tensor(candle.zeros((N, C, pH, W)).to_device(input.device).to_dtype(input.dtype))
-            bottom = Tensor(candle.zeros((N, C, pH, W)).to_device(input.device).to_dtype(input.dtype))
+            top    = Tensor(_kernels.PyTensor.zeros((N, C, pH, W), device=input.device, dtype=input.dtype))
+            bottom = Tensor(_kernels.PyTensor.zeros((N, C, pH, W), device=input.device, dtype=input.dtype))
             input  = ops.cat([top, input, bottom], dim=2)
         if pW > 0:
             H2   = input.shape[2]
-            left  = Tensor(candle.zeros((N, C, H2, pW)).to_device(input.device).to_dtype(input.dtype))
-            right = Tensor(candle.zeros((N, C, H2, pW)).to_device(input.device).to_dtype(input.dtype))
+            left  = Tensor(_kernels.PyTensor.zeros((N, C, H2, pW), device=input.device, dtype=input.dtype))
+            right = Tensor(_kernels.PyTensor.zeros((N, C, H2, pW), device=input.device, dtype=input.dtype))
             input = ops.cat([left, input, right], dim=3)
 
     N, C_in, H_in, W_in = input.shape
@@ -258,7 +239,7 @@ def conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
             patch_flat = patch.reshape((N, C_in * kH * kW))
             res        = patch_flat.matmul(w_flat.t())
             if bias is not None:
-                res = res.broadcast_add(bias._tensor.unsqueeze(0))
+                res = res.add(bias._tensor.unsqueeze(0))
             row_cols.append(Tensor(res.unsqueeze(2).unsqueeze(3)))
         output_rows.append(ops.cat(row_cols, dim=3))
     return ops.cat(output_rows, dim=2)
@@ -343,9 +324,7 @@ def batch_norm(input, running_mean, running_var, weight=None, bias=None,
         mu    = running_mean.reshape((1, C) + extra)
         var   = running_var .reshape((1, C) + extra)
 
-    denom = (var + Tensor(
-        candle.ones(var.shape).to_device(var.device).to_dtype(var.dtype)
-    ) * eps).sqrt()
+    denom = (var + eps).sqrt()
     x_norm = (t - mu) / denom
 
     C = t.shape[1]
@@ -359,36 +338,19 @@ def batch_norm(input, running_mean, running_var, weight=None, bias=None,
 
 
 def layer_norm(input, normalized_shape, weight=None, bias=None, eps=1e-5):
-    """layer_norm via candle sum_keepdim / arithmetic — no numpy."""
-    t    = input
-    ndim = t.ndim
-    dims = list(range(ndim - len(normalized_shape), ndim))
-
-    # mean
-    mu = t
-    for d in sorted(dims, reverse=True):
-        mu = mu.sum(dim=d, keepdim=True)
-    n  = 1
-    for d in dims:
-        n *= t.shape[d]
-    mu = mu * (1.0 / n)
-
-    diff  = t - mu
-    var   = (diff * diff)
-    for d in sorted(dims, reverse=True):
-        var = var.sum(dim=d, keepdim=True)
-    var   = var * (1.0 / n)
-
-    denom  = (var + Tensor(
-        candle.ones(var.shape).to_device(var.device).to_dtype(var.dtype)
-    ) * eps).sqrt()
-    x_norm = diff / denom
-
-    if weight is not None:
-        x_norm = x_norm * weight
-    if bias is not None:
-        x_norm = x_norm + bias
-    return x_norm
+    # Standard path via candle arithmetic
+    ndim = input.ndim
+    if isinstance(normalized_shape, int):
+        normalized_shape = [normalized_shape]
+    axis = list(range(ndim - len(normalized_shape), ndim))
+    
+    mu = input.mean(dim=axis, keepdim=True)
+    diff = input - mu
+    var = (diff * diff).mean(dim=axis, keepdim=True)
+    out = diff / (var + eps).sqrt()
+    if weight is not None: out = out * weight
+    if bias is not None: out = out + bias
+    return out
 
 
 def group_norm(input, num_groups, weight=None, bias=None, eps=1e-5):  # numpy fallback
@@ -429,13 +391,12 @@ def local_response_norm(input, size, alpha=1e-4, beta=0.75, k=1.0):  # numpy
 def embedding(input, weight, padding_idx=None, max_norm=None, norm_type=2.0,
               scale_grad_by_freq=False, sparse=False):
     """embedding via candle index_select — zero numpy on forward pass."""
-    indices = input._tensor.to_dtype(candle.u32)
+    indices = input._tensor.to_dtype("uint32")
     out     = Tensor(weight._tensor.index_select(indices, 0))
     if padding_idx is not None:
-        mask = ops.eq(input, Tensor([float(padding_idx)]))
-        # zero out those rows — where_cond
-        z    = Tensor(candle.zeros(out.shape).to_device(out.device).to_dtype(out.dtype))
-        out  = ops.where(mask.unsqueeze(-1).expand_as(out), z, out)
+        mask = ops.eq(input, float(padding_idx))
+        z    = Tensor(_kernels.PyTensor.zeros(out.shape, device=out.device, dtype=out.dtype))
+        out  = ops.where(mask.unsqueeze(-1), z, out)
     if max_norm is not None:
         norms = _np(out)
         n     = np.linalg.norm(norms, ord=norm_type, axis=-1, keepdims=True)
@@ -494,8 +455,7 @@ def binary_cross_entropy(input, target, weight=None, size_average=None,
     # clamp via candle
     x   = input.clamp(min=eps, max=1 - eps)
     t   = target
-    one = Tensor(candle.ones(x.shape).to_device(x.device).to_dtype(x.dtype))
-    loss = (t * x.log() + (one - t) * (one - x).log()).neg()
+    loss = -(t * x.log() + (1.0 - t) * (1.0 - x).log())
     if weight is not None:
         loss = loss * weight
     if reduction == 'mean': return loss.mean()
@@ -505,12 +465,11 @@ def binary_cross_entropy(input, target, weight=None, size_average=None,
 
 def binary_cross_entropy_with_logits(input, target, weight=None, size_average=None,
                                      reduce=None, reduction='mean', pos_weight=None):
-    """Numerically stable BCE with logits — pure candle."""
-    one  = Tensor(candle.ones(input.shape).to_device(input.device).to_dtype(input.dtype))
+    """Numerically stable BCE with logits."""
     # log(1 + exp(x)) = softplus(x)
     sp   = softplus(input)
     if pos_weight is not None:
-        loss = (one + (pos_weight - one) * target) * sp - input * target
+        loss = (1.0 + (pos_weight - 1.0) * target) * sp - input * target
     else:
         loss = sp - input * target
     if weight is not None:
@@ -526,9 +485,7 @@ def smooth_l1_loss(input, target, size_average=None, reduce=None, reduction='mea
     sq_part  = diff * diff * (0.5 / beta)
     lin_part = diff - 0.5 * beta
     # select: diff < beta → sq, else lin
-    loss = ops.where(diff < Tensor(
-        candle.ones(diff.shape).to_device(diff.device).to_dtype(diff.dtype) * beta
-    ), sq_part, lin_part)
+    loss = ops.where(diff < beta, sq_part, lin_part)
     if reduction == 'mean': return loss.mean()
     if reduction == 'sum':  return loss.sum()
     return loss
@@ -543,8 +500,7 @@ def poisson_nll_loss(input, target, log_input=True, full=False, size_average=Non
     if log_input:
         loss = input.exp() - target * input
     else:
-        one = Tensor(candle.ones(input.shape).to_device(input.device).to_dtype(input.dtype))
-        loss = input - target * (input + one * eps).log()
+        loss = input - target * (input + eps).log()
     if reduction == 'mean': return loss.mean()
     if reduction == 'sum':  return loss.sum()
     return loss
@@ -554,8 +510,7 @@ def kl_div(input, target, size_average=None, reduce=None, reduction='mean', log_
     if log_target:
         loss = target.exp() * (target - input)
     else:
-        eps = Tensor(candle.ones(input.shape).to_device(input.device).to_dtype(input.dtype) * 1e-7)
-        loss = target * ((target + eps).log() - input)
+        loss = target * ((target + 1e-7).log() - input)
     if reduction == 'mean':      return loss.mean()
     if reduction == 'sum':       return loss.sum()
     if reduction == 'batchmean': return loss.sum() * (1.0 / input.shape[0])
@@ -565,9 +520,7 @@ def kl_div(input, target, size_average=None, reduce=None, reduction='mean', log_
 def margin_ranking_loss(input1, input2, target, margin=0.0, size_average=None,
                         reduce=None, reduction='mean'):
     diff = (input2 - input1) * target
-    zero = Tensor(candle.zeros(diff.shape).to_device(diff.device).to_dtype(diff.dtype))
-    m_t  = Tensor(candle.ones(diff.shape).to_device(diff.device).to_dtype(diff.dtype) * margin)
-    loss = ops.where(diff + m_t > zero, zero, m_t - diff)
+    loss = ops.where(diff + margin > 0.0, 0.0, margin - diff)
     if reduction == 'mean': return loss.mean()
     if reduction == 'sum':  return loss.sum()
     return loss
@@ -706,7 +659,7 @@ def interpolate(input, size=None, scale_factor=None, mode='nearest', align_corne
         except ImportError:
             ih = (np.arange(new_H) * H / new_H).astype(int)
             iw = (np.arange(new_W) * W / new_W).astype(int)
-            return Tensor(x[:, :, ih, :][:, :, :, iw].astype(np.float32))
+            return Tensor(x[:, :, ih[:, None], iw[None, :]].astype(np.float32))
     raise NotImplementedError("interpolate only supports 4D tensors")
 
 
@@ -736,11 +689,11 @@ def fold(input, output_size, kernel_size, dilation=1, padding=0, stride=1):
 # ─── DROPOUT ────────────────────────────────────────────────────────────────
 
 def dropout(input, p=0.5, training=True, inplace=False):
-    """Dropout via candle rand — avoids numpy mask creation."""
+    """Dropout."""
     if not training or p == 0:
         return input
-    mask  = candle.rand(input.shape).to_device(input.device).to_dtype(input.dtype)
-    # mask > p → keep=True (1.0); else 0.0
-    keep_np = (_np(Tensor(mask)) > p).astype(np.float32) / (1.0 - p)
-    return Tensor(Tensor(candle.Tensor(keep_np.flatten().tolist()).reshape(keep_np.shape))._tensor
-                  * input._tensor)
+    # rand [0,1)
+    mask = Tensor(_kernels.PyTensor.rand(input.shape, device=input.device, dtype=input.dtype))
+    # keep if rand > p
+    keep_mask = (mask > p).float() / (1.0 - p)
+    return input * keep_mask

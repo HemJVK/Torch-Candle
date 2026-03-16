@@ -1,23 +1,10 @@
 from .optimizer import Optimizer
 import math
-
-try:
-    import candle
-except ImportError:
-    candle = None
-
+import torch_candle_backend as _kernels
 
 class Adam(Optimizer):
     """
     Adam optimizer: Adaptive Moment Estimation.
-    
-    Args:
-        params: iterable of parameters to optimize
-        lr (float): learning rate (default: 1e-3)
-        betas (Tuple[float, float]): coefficients for computing running averages
-        eps (float): term added for numerical stability
-        weight_decay (float): L2 penalty (default: 0)
-        amsgrad (bool): use AMSGrad variant (default: False)
     """
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
                  weight_decay=0, amsgrad=False):
@@ -53,16 +40,14 @@ class Adam(Optimizer):
                 if p.grad is None:
                     continue
                 
-                # Keep grad as torch_candle.Tensor for consistent arithmetic
                 grad = p.grad
                 
-                # Initialise state using zeros_like from torch_candle
                 if id(p) not in self.state:
-                    from .. import zeros
+                    from .. import zeros_like
                     self.state[id(p)] = {
                         'step': 0,
-                        'exp_avg': zeros(p.shape, device=p.device, dtype=p.dtype),
-                        'exp_avg_sq': zeros(p.shape, device=p.device, dtype=p.dtype),
+                        'exp_avg': zeros_like(p),
+                        'exp_avg_sq': zeros_like(p),
                     }
                 
                 state = self.state[id(p)]
@@ -88,7 +73,11 @@ class Adam(Optimizer):
                 # Compute denominator: sqrt(exp_avg_sq) + eps
                 denom = state['exp_avg_sq'].sqrt() + eps
                 
-                # Parameter update
-                p._tensor = (p - state['exp_avg'] * step_size / denom)._tensor
+                # Parameter update — ensure we don't track this updated as part of autograd
+                from .. import no_grad
+                with no_grad():
+                    # Direct tensor update via Rust backend to avoid creating subgraph
+                    update = state['exp_avg'] * (step_size / denom)
+                    p._tensor = (p - update)._tensor
 
         return loss

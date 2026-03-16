@@ -13,7 +13,10 @@ class Optimizer:
         for group in self.param_groups:
             for p in group['params']:
                 if p.grad is not None:
-                    p.grad._tensor = p.grad._tensor.zeros_like()
+                    if p.grad.grad_fn is not None:
+                        p.grad.detach_()
+                    else:
+                        p.grad.zero_()
 
     def step(self, closure=None):
         raise NotImplementedError

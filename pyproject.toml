@@ -6,15 +6,16 @@ authors = [
     { name = "Antigravity", email = "antigravity@example.com" }
 ]
 dependencies = [
-    "candle-pyo3",
     "numpy",
     "pytest>=8.3.5",
 ]
-requires-python = ">=3.8, <3.11"
+requires-python = ">=3.8, <3.13"
 
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "torch_candle_backend"
+working-directory = "rust"

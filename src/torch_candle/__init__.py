@@ -1,15 +1,7 @@
-"""
-torch_candle — A one-to-one PyTorch 2.10 API clone using Candle (Rust/PyO3) as the backend.
-All ops dispatch directly to Candle Rust – hardware agnostic (CPU/CUDA/Metal).
-"""
-
-try:
-    import candle
-except ImportError:
-    candle = None
-
 import numpy as np
 import math
+
+import torch_candle_backend as _kernels
 
 from .tensor import Tensor
 from . import ops
@@ -41,18 +33,32 @@ from .ops import (
 from .device import device
 from . import cuda
 
-try:
-    from . import nn
-    from . import optim
-    from . import utils
-    from . import linalg
-    from . import fft
-    from . import amp
-    from . import random as _random
-    from . import distributions
-    from . import autograd
-except ImportError:
-    pass
+try: from . import nn
+except ImportError: pass
+
+try: from . import optim
+except ImportError: pass
+
+try: from . import utils
+except ImportError: pass
+
+try: from . import linalg
+except ImportError: pass
+
+try: from . import fft
+except ImportError: pass
+
+try: from . import amp
+except ImportError: pass
+
+try: from . import random as _random
+except ImportError: pass
+
+try: from . import distributions
+except ImportError: pass
+
+try: from . import autograd
+except ImportError: pass
 
 # ============================================================
 # Context Managers — torch.no_grad / enable_grad
@@ -83,9 +89,16 @@ def set_grad_enabled(mode: bool):
 # ============================================================
 
 def tensor(data, dtype=None, device=None, requires_grad=False):
+    """Create a tensor from data."""
+    if device is None: device = "cpu"
+    if dtype is None: dtype = "float32"
+    if isinstance(data, Tensor):
+        return data
     return Tensor(data, dtype=dtype, device=device, requires_grad=requires_grad)
 
 def as_tensor(data, dtype=None, device=None):
+    if device is None: device = "cpu"
+    if dtype is None: dtype = "float32"
     return Tensor(data, dtype=dtype, device=device)
 
 def _get_shape(*args):
@@ -95,29 +108,29 @@ def _get_shape(*args):
 
 # --- Factory functions via Candle Rust ---
 
-def ones(*size, dtype=None, device=None, requires_grad=False, out=None):
-    """All-ones tensor — uses candle.ones directly."""
+def ones(*size, dtype="float32", device="cpu", requires_grad=False, out=None):
+    """All-ones tensor."""
     shape = _get_shape(*size)
-    t = candle.ones(shape)
-    return Tensor(t, dtype=dtype, device=device, requires_grad=requires_grad)
+    return Tensor(_kernels.PyTensor.ones(shape, device=device, dtype=dtype), requires_grad=requires_grad)
 
-def zeros(*size, dtype=None, device=None, requires_grad=False, out=None):
-    """All-zeros tensor — uses candle.zeros directly."""
+def zeros(*size, dtype="float32", device="cpu", requires_grad=False, out=None):
+    """All-zeros tensor."""
+    if device is None: device = "cpu"
+    if dtype is None: dtype = "float32"
     shape = _get_shape(*size)
-    t = candle.zeros(shape)
-    return Tensor(t, dtype=dtype, device=device, requires_grad=requires_grad)
+    return Tensor(_kernels.PyTensor.zeros(shape, device=device, dtype=dtype), requires_grad=requires_grad)
 
-def randn(*size, dtype=None, device=None, requires_grad=False, generator=None, out=None):
-    """Standard-normal tensor — uses candle.randn."""
+def randn(*size, dtype="float32", device="cpu", requires_grad=False, generator=None, out=None):
+    """Standard-normal tensor."""
     shape = _get_shape(*size)
-    t = candle.randn(shape)
-    return Tensor(t, dtype=dtype, device=device, requires_grad=requires_grad)
+    arr = np.random.randn(*shape).astype(np.float32)
+    return Tensor(arr, dtype=dtype, device=device, requires_grad=requires_grad)
 
-def rand(*size, dtype=None, device=None, requires_grad=False, generator=None, out=None):
-    """Uniform [0,1) tensor — uses candle.rand."""
+def rand(*size, dtype="float32", device="cpu", requires_grad=False, generator=None, out=None):
+    """Uniform [0,1) tensor."""
     shape = _get_shape(*size)
-    t = candle.rand(shape)
-    return Tensor(t, dtype=dtype, device=device, requires_grad=requires_grad)
+    arr = np.random.rand(*shape).astype(np.float32)
+    return Tensor(arr, dtype=dtype, device=device, requires_grad=requires_grad)
 
 def randint(low, high=None, size=None, dtype=None, device=None, requires_grad=False, generator=None):
     if high is None:
@@ -153,15 +166,12 @@ def eye(n, m=None, dtype=None, device=None, requires_grad=False):
     return Tensor(arr, dtype=dtype, device=device, requires_grad=requires_grad)
 
 def full(size, fill_value, dtype=None, device=None, requires_grad=False):
-    """Constant-filled tensor — candle.ones * fill_value."""
-    t = candle.ones(tuple(size)) * float(fill_value)
-    return Tensor(t, dtype=dtype, device=device, requires_grad=requires_grad)
+    """Constant-filled tensor."""
+    return ones(*size, dtype=dtype, device=device, requires_grad=requires_grad) * float(fill_value)
 
 def empty(*size, dtype=None, device=None, requires_grad=False):
-    """Uninitialised (zero-initialised) tensor — candle.zeros."""
-    shape = _get_shape(*size)
-    t = candle.zeros(shape)
-    return Tensor(t, dtype=dtype, device=device, requires_grad=requires_grad)
+    """Uninitialised (zero-initialised) tensor."""
+    return zeros(*size, dtype=dtype, device=device, requires_grad=requires_grad)
 
 # --- _like variants ---
 def ones_like(input, dtype=None, device=None, requires_grad=False):
@@ -211,19 +221,16 @@ def seed():
 
 # ============================================================
 # Dtype exports (map to candle dtypes)
-# ============================================================
-if candle is not None:
-    float32 = getattr(candle, 'f32', None)
-    float64 = getattr(candle, 'f64', None)
-    int64   = getattr(candle, 'i64', getattr(candle, 'u32', None))
-    int32   = getattr(candle, 'i32', getattr(candle, 'u32', None))
-    float16 = getattr(candle, 'f16', None)
-    bfloat16 = getattr(candle, 'bf16', None)
-    uint8   = getattr(candle, 'u8', None)
-    long    = int64
-    bool    = getattr(candle, 'u8', None)   # closest
-else:
-    float32 = float64 = int64 = int32 = float16 = bfloat16 = uint8 = long = bool = None
+# ============================================================# Dtype exports (string mappings)
+float32 = "float32"
+float64 = "float64"
+int64   = "int64"
+int32   = "int32"
+float16 = "float16"
+bfloat16 = "bfloat16"
+uint8   = "uint8"
+long    = "int64"
+bool    = "bool"
 
 # Constants
 inf = math.inf

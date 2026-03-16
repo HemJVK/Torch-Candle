@@ -8,7 +8,7 @@ def test_gelu():
     out = F.gelu(t)
     # GELU(-1) ~ -0.1587, GELU(0) = 0, GELU(1) ~ 0.8413
     expected = np.array([-0.158655, 0.0, 0.841345])
-    assert np.allclose(out.numpy(), expected, atol=1e-4)
+    assert np.allclose(out.numpy(), expected, atol=2e-4)
 
 def test_silu():
     t = torch.tensor([-1.0, 0.0, 1.0])

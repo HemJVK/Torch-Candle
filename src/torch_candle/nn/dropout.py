@@ -2,10 +2,7 @@
 from .module import Module
 import numpy as np
 
-try:
-    import candle as _candle
-except ImportError:
-    _candle = None
+
 
 
 class Dropout(Module):

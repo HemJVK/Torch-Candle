@@ -1,17 +1,12 @@
 """torch_candle.cuda — CUDA utility functions matching torch.cuda API."""
 
-try:
-    import candle as _candle
-except ImportError:
-    _candle = None
+import torch_candle_backend as _kernels
 
 
 def is_available():
     """Returns True if GPU/CUDA is available via Candle backend."""
-    if _candle is None:
-        return False
     try:
-        _candle.Tensor([0]).to_device('cuda')
+        _kernels.PyTensor.ones([1], device="cuda", dtype="float32")
         return True
     except Exception:
         return False

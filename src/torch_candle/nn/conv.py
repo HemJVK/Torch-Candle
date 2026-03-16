@@ -5,10 +5,7 @@ from . import functional as F
 import numpy as np
 import math
 
-try:
-    import candle as _candle
-except ImportError:
-    _candle = None
+
 
 
 class _ConvNd(Module):
