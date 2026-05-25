@@ -121,16 +121,14 @@ def zeros(*size, dtype="float32", device="cpu", requires_grad=False, out=None):
     return Tensor(_kernels.PyTensor.zeros(shape, device=device, dtype=dtype), requires_grad=requires_grad)
 
 def randn(*size, dtype="float32", device="cpu", requires_grad=False, generator=None, out=None):
-    """Standard-normal tensor."""
+    """Standard-normal tensor via native Rust."""
     shape = _get_shape(*size)
-    arr = np.random.randn(*shape).astype(np.float32)
-    return Tensor(arr, dtype=dtype, device=device, requires_grad=requires_grad)
+    return Tensor(_kernels.PyTensor.randn(shape, device=device, dtype=dtype), requires_grad=requires_grad)
 
 def rand(*size, dtype="float32", device="cpu", requires_grad=False, generator=None, out=None):
-    """Uniform [0,1) tensor."""
+    """Uniform [0,1) tensor via native Rust."""
     shape = _get_shape(*size)
-    arr = np.random.rand(*shape).astype(np.float32)
-    return Tensor(arr, dtype=dtype, device=device, requires_grad=requires_grad)
+    return Tensor(_kernels.PyTensor.rand(shape, device=device, dtype=dtype), requires_grad=requires_grad)
 
 def randint(low, high=None, size=None, dtype=None, device=None, requires_grad=False, generator=None):
     if high is None:
@@ -197,18 +195,19 @@ def empty_like(input, dtype=None, device=None, requires_grad=False):
 # ============================================================
 def save(obj, f):
     import pickle
-    if isinstance(obj, Tensor):
-        obj = obj.numpy()
     with open(f, 'wb') as fh:
         pickle.dump(obj, fh)
 
 def load(f, map_location=None):
     import pickle
     with open(f, 'rb') as fh:
-        obj = pickle.load(fh)
-    if isinstance(obj, np.ndarray):
-        return Tensor(obj)
-    return obj
+        return pickle.load(fh)
+
+# ============================================================
+# Dynamic Graph Compilation JIT & PyTorch Compatibility Layer
+# ============================================================
+from .compile import compile
+from .compat import enable_torch_compat
 
 # ============================================================
 # Random

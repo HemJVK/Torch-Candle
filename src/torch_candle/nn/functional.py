@@ -28,11 +28,19 @@ def _np(t):
 # ─── BASIC ACTIVATIONS — 100% candle ────────────────────────────────────────
 
 def relu(input, inplace=False):
+    if inplace:
+        return input.relu_()
     return input.relu()
 
 
 def leaky_relu(input, negative_slope=0.01, inplace=False):
     """leaky_relu(x) = relu(x) + negative_slope * relu(-x)."""
+    if inplace:
+        pos  = input.relu()
+        neg_ = input.neg().relu()
+        res = pos - neg_ * negative_slope
+        input._tensor = res._tensor
+        return input
     pos  = input.relu()
     neg_ = input.neg().relu()
     return pos - neg_ * negative_slope
@@ -49,25 +57,13 @@ def tanh(input):
 def softmax(input, dim=None, dtype=None):
     if dim is None:
         dim = -1
-    raw = _raw(input)
-    if hasattr(raw, 'softmax'):
-        return input._fast_wrap(raw.softmax(dim))
-    x_max = input.max_keepdim(dim)
-    shifted = input - x_max
-    exp_x = shifted.exp()
-    sum_exp = exp_x.sum(dim=dim, keepdim=True)
-    return exp_x / sum_exp
+    return input._fast_wrap(input._tensor.softmax(dim))
 
 
 def log_softmax(input, dim=None, dtype=None):
     if dim is None:
         dim = -1
-    raw = _raw(input)
-    if hasattr(raw, 'log_softmax'):
-        return input._fast_wrap(raw.log_softmax(dim))
-    x_max = input.max_keepdim(dim)
-    shifted = input - x_max
-    return shifted - (shifted.exp().sum(dim=dim, keepdim=True).log())
+    return input._fast_wrap(input._tensor.log_softmax(dim))
 
 
 def gelu(input, approximate='none'):
@@ -82,15 +78,11 @@ def gelu(input, approximate='none'):
         return input * (inner.tanh() + 1.0) * 0.5
     else:
         # Native ops.erf
-        erf_x = ops.erf(input / 1.4142135623) # sqrt(2)
+        erf_x = (input / 1.4142135623).erf()
         return input * 0.5 * (1.0 + erf_x)
 
 
 def silu(input, inplace=False):
-    if input.requires_grad:
-        from ..autograd import SiLU
-        return SiLU.apply(input)
-    
     return input * input.sigmoid()
 
 
@@ -206,43 +198,18 @@ def linear(input, weight, bias=None):
 # ─── CONVOLUTION ─────────────────────────────────────────────────────────────
 
 def conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
-    """conv2d via candle narrow + matmul."""
-    if isinstance(stride, int):   stride  = (stride, stride)
-    if isinstance(padding, int):  padding = (padding, padding)
-
-    if padding[0] > 0 or padding[1] > 0:
-        pH, pW = padding
-        N, C, H, W = input.shape
-        if pH > 0:
-            top    = Tensor(_kernels.PyTensor.zeros((N, C, pH, W), device=input.device, dtype=input.dtype))
-            bottom = Tensor(_kernels.PyTensor.zeros((N, C, pH, W), device=input.device, dtype=input.dtype))
-            input  = ops.cat([top, input, bottom], dim=2)
-        if pW > 0:
-            H2   = input.shape[2]
-            left  = Tensor(_kernels.PyTensor.zeros((N, C, H2, pW), device=input.device, dtype=input.dtype))
-            right = Tensor(_kernels.PyTensor.zeros((N, C, H2, pW), device=input.device, dtype=input.dtype))
-            input = ops.cat([left, input, right], dim=3)
-
-    N, C_in, H_in, W_in = input.shape
-    C_out, C_in_g, kH, kW = weight.shape
-    sH, sW = stride
-    H_out = (H_in - kH) // sH + 1
-    W_out = (W_in - kW) // sW + 1
-
-    w_flat = weight._tensor.reshape((C_out, C_in_g * kH * kW))
-
-    output_rows = []
-    for i in range(H_out):
-        row_cols = []
-        for j in range(W_out):
-            patch      = input._tensor.narrow(2, i * sH, kH).narrow(3, j * sW, kW)
-            patch_flat = patch.reshape((N, C_in * kH * kW))
-            res        = patch_flat.matmul(w_flat.t())
-            if bias is not None:
-                res = res.add(bias._tensor.unsqueeze(0))
-            row_cols.append(Tensor(res.unsqueeze(2).unsqueeze(3)))
-        output_rows.append(ops.cat(row_cols, dim=3))
-    return ops.cat(output_rows, dim=2)
+    """conv2d via native candle kernel."""
+    if isinstance(stride, int): stride = (stride, stride)
+    if isinstance(padding, int): padding = (padding, padding)
+    # Candle implementation currently takes a single integer for stride/padding if they are symmetric
+    # or it might take specific values. Let's use the first element if they are tuples, 
+    # assuming candle_core's conv2d takes them as such.
+    s = stride[0] if isinstance(stride, (list, tuple)) else stride
+    p = padding[0] if isinstance(padding, (list, tuple)) else padding
+    
+    b_raw = bias._tensor if bias is not None else None
+    res = input._tensor.conv2d(weight._tensor, b_raw, s, p)
+    return input._fast_wrap(res)
 
 
 # ─── POOLING ─────────────────────────────────────────────────────────────────
@@ -586,13 +553,7 @@ def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.
     attn = softmax(scores, dim=-1)
 
     if dropout_p > 0.0:
-        # candle rand-based dropout
-        mask = Tensor(candle.rand(attn.shape).to_device(attn.device).to_dtype(attn.dtype))
-        keep = Tensor(candle.ones(attn.shape).to_device(attn.device).to_dtype(attn.dtype) * dropout_p)
-        # keep where rand > p
-        attn_np = _np(attn)
-        m_np    = _np(mask)
-        attn    = Tensor((attn_np * (m_np > dropout_p).astype(np.float32) / (1 - dropout_p)).astype(np.float32))
+        attn = dropout(attn, p=dropout_p, training=True)
 
     return attn.matmul(value)
 
@@ -697,3 +658,35 @@ def dropout(input, p=0.5, training=True, inplace=False):
     # keep if rand > p
     keep_mask = (mask > p).float() / (1.0 - p)
     return input * keep_mask
+
+
+def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False):
+    """
+    Scaled Dot-Product Attention (SDPA).
+    Calculates: Softmax(Q K^T / sqrt(d_k)) V
+    """
+    d_k = key.shape[-1]
+    scale = 1.0 / (d_k ** 0.5)
+    
+    # Transpose key's last two dimensions: (..., S, D) -> (..., D, S)
+    k_t = key.transpose(-2, -1).contiguous()
+    
+    # query @ k_t
+    scores = query.matmul(k_t) * scale
+    
+    if is_causal:
+        import numpy as np
+        sq, sk = scores.shape[-2], scores.shape[-1]
+        mask_np = np.triu(np.ones((sq, sk), dtype=np.float32), k=1) * -1e9
+        mask_tensor = Tensor(mask_np, device=scores.device, dtype=scores.dtype)
+        scores = scores + mask_tensor
+        
+    if attn_mask is not None:
+        scores = scores + attn_mask
+        
+    attn_weights = softmax(scores, dim=-1)
+    
+    if dropout_p > 0.0:
+        attn_weights = dropout(attn_weights, p=dropout_p, training=True)
+        
+    return attn_weights.matmul(value)

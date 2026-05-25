@@ -38,3 +38,27 @@ class AvgPool2d(Module):
 
     def __repr__(self):
         return f"AvgPool2d(kernel_size={self.kernel_size}, stride={self.stride}, padding={self.padding})"
+
+
+class AdaptiveAvgPool2d(Module):
+    def __init__(self, output_size):
+        super().__init__()
+        self.output_size = output_size
+
+    def forward(self, input):
+        return F.adaptive_avg_pool2d(input, self.output_size)
+
+    def __repr__(self):
+        return f"AdaptiveAvgPool2d(output_size={self.output_size})"
+
+
+class AdaptiveMaxPool2d(Module):
+    def __init__(self, output_size):
+        super().__init__()
+        self.output_size = output_size
+
+    def forward(self, input):
+        return F.adaptive_max_pool2d(input, self.output_size)
+
+    def __repr__(self):
+        return f"AdaptiveMaxPool2d(output_size={self.output_size})"

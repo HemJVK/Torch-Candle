@@ -75,3 +75,33 @@ def test_cosine_annealing():
     scheduler.step()
     lr = optimizer.param_groups[0]['lr']
     assert lr < 0.1 and lr > 0.0
+
+
+def test_new_optimizers():
+    # AdamW
+    w1 = torch.tensor([1.0], requires_grad=True)
+    w1.grad = torch.tensor([0.1])
+    optimizer_w = optim.AdamW([w1], lr=0.1)
+    optimizer_w.step()
+    assert w1.item() < 1.0
+
+    # ASGD
+    w2 = torch.tensor([1.0], requires_grad=True)
+    w2.grad = torch.tensor([0.1])
+    optimizer_a = optim.ASGD([w2], lr=0.1)
+    optimizer_a.step()
+    assert w2.item() < 1.0
+
+    # Adadelta
+    w3 = torch.tensor([1.0], requires_grad=True)
+    w3.grad = torch.tensor([0.1])
+    optimizer_ad = optim.Adadelta([w3], lr=0.1)
+    optimizer_ad.step()
+    assert w3.item() < 1.0
+
+    # Rprop
+    w4 = torch.tensor([1.0], requires_grad=True)
+    w4.grad = torch.tensor([0.1])
+    optimizer_rp = optim.Rprop([w4], lr=0.1)
+    optimizer_rp.step()
+    assert w4.item() < 1.0

@@ -2,14 +2,21 @@
 name = "torch_candle"
 version = "0.1.0"
 description = "A PyTorch-compatible API with Candle backend"
+readme = "README.md"
 authors = [
-    { name = "Antigravity", email = "antigravity@example.com" }
+    { name = "Hem", email = "hem@example.com" }
 ]
 dependencies = [
     "numpy",
     "pytest>=8.3.5",
 ]
 requires-python = ">=3.8, <3.13"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: OSI Approved :: MIT License",
+]
 
 [build-system]
 requires = ["maturin>=1.5,<2.0"]
@@ -19,3 +26,6 @@ build-backend = "maturin"
 features = ["pyo3/extension-module"]
 module-name = "torch_candle_backend"
 working-directory = "rust"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

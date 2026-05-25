@@ -24,10 +24,22 @@ class Linear(Module):
             self.register_parameter('bias', None)
 
     def forward(self, input):
-        res = ops.mm(input, self.weight.t())
-        if self.bias is not None:
-            res = res + self.bias
-        return res
+        orig_shape = input.shape
+        if len(orig_shape) > 2:
+            import numpy as np
+            in_features = orig_shape[-1]
+            batch_dims = int(np.prod(orig_shape[:-1]))
+            x_2d = input.view(batch_dims, in_features)
+            res_2d = ops.mm(x_2d, self.weight.t())
+            if self.bias is not None:
+                res_2d = res_2d + self.bias
+            out_shape = list(orig_shape[:-1]) + [self.out_features]
+            return res_2d.view(*out_shape)
+        else:
+            res = ops.mm(input, self.weight.t())
+            if self.bias is not None:
+                res = res + self.bias
+            return res
 
     def __repr__(self):
         return f"Linear(in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None})"

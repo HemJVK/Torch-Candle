@@ -27,10 +27,37 @@ class CrossEntropyLoss(_Loss):
         super().__init__(size_average, reduce, reduction)
 
     def forward(self, input, target):
-        # input: (N, C), target: (N)
-        # Simplified CE loss: -log(softmax(input)[target])
-        # Candle might have functional cross_entropy
-        # For now, placeholder or manual log_softmax
-        # softmax = ops.softmax(input, dim=1)
-        # ...
-        raise NotImplementedError("CrossEntropyLoss requires more robust functional ops")
+        from . import functional as F
+        return F.cross_entropy(input, target, reduction=self.reduction)
+
+
+class L1Loss(_Loss):
+    def __init__(self, size_average=None, reduce=None, reduction='mean'):
+        super().__init__(size_average, reduce, reduction)
+
+    def forward(self, input, target):
+        from . import functional as F
+        return F.l1_loss(input, target, reduction=self.reduction)
+
+
+class BCELoss(_Loss):
+    def __init__(self, weight=None, size_average=None, reduce=None, reduction='mean'):
+        super().__init__(size_average, reduce, reduction)
+        self.weight = weight
+
+    def forward(self, input, target):
+        from . import functional as F
+        return F.binary_cross_entropy(input, target, weight=self.weight, reduction=self.reduction)
+
+
+class BCEWithLogitsLoss(_Loss):
+    def __init__(self, weight=None, size_average=None, reduce=None, reduction='mean', pos_weight=None):
+        super().__init__(size_average, reduce, reduction)
+        self.weight = weight
+        self.pos_weight = pos_weight
+
+    def forward(self, input, target):
+        from . import functional as F
+        return F.binary_cross_entropy_with_logits(
+            input, target, weight=self.weight, reduction=self.reduction, pos_weight=self.pos_weight
+        )

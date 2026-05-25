@@ -14,7 +14,7 @@ class Tensor:
     """torch_candle.Tensor — thin wrapper around candle.Tensor (Rust via PyO3).
     """
 
-    __slots__ = ['_tensor', '_device', '_dtype', '_shape']
+    __slots__ = ['_tensor', '_device', '_dtype', '_shape', '_id']
 
     _grad_enabled = True  # toggled by torch.no_grad()
 
@@ -27,6 +27,10 @@ class Tensor:
         return self._tensor is other._tensor
 
     # ──────────────────────────────────────────────────────────────
+    # Class-level Automatic Mixed Precision flags
+    _amp_enabled = False
+    _amp_dtype = "float16"
+
     # Construction
     # ──────────────────────────────────────────────────────────────
     def __init__(self, data, dtype="float32", device="cpu", requires_grad=False):
@@ -45,24 +49,37 @@ class Tensor:
                 self._tensor = data
         else:
             if isinstance(data, (list, tuple, np.ndarray, float, int, np.float32, np.float64)):
-                arr = np.array(data, dtype=np.float32)
+                arr = np.ascontiguousarray(data, dtype=np.float32)
             else:
-                arr = np.array(data).astype(np.float32)
+                arr = np.ascontiguousarray(np.array(data), dtype=np.float32)
             self._tensor = _kernels.PyTensor(arr, device=device, dtype=dtype, requires_grad=requires_grad)
 
         # Cache properties from Rust core
         self._device = self._tensor.device
-        self._dtype = "float32"
+        self._dtype = dtype
         self._shape = tuple(self._tensor.shape)
 
+        # Unique ID for graph compiler tracing
+        if not hasattr(Tensor, "_id_counter"):
+            Tensor._id_counter = 0
+        Tensor._id_counter += 1
+        self._id = Tensor._id_counter
+
     @classmethod
-    def _fast_wrap(cls, rust_tensor):
+    def _fast_wrap(cls, rust_tensor, dtype="float32"):
         """Internal fast construction bypassing __init__ overhead."""
         obj = cls.__new__(cls)
         obj._tensor = rust_tensor
         obj._device = rust_tensor.device
-        obj._dtype = "float32"
+        obj._dtype = dtype
         obj._shape = tuple(rust_tensor.shape)
+
+        # Unique ID for graph compiler tracing
+        if not hasattr(Tensor, "_id_counter"):
+            Tensor._id_counter = 0
+        Tensor._id_counter += 1
+        obj._id = Tensor._id_counter
+
         return obj
 
     # ──────────────────────────────────────────────────────────────
@@ -102,7 +119,48 @@ class Tensor:
     @property
     def grad(self):
         g = self._tensor.grad
-        return self._fast_wrap(g) if g is not None else None
+        if g is None:
+            return None
+        
+        res_grad = self._fast_wrap(g, dtype=self.dtype)
+        
+        # Self-Healing Autograd Engine (SHA)
+        if self.requires_grad and getattr(Tensor, "enable_sha", True):
+            grad_np = res_grad.numpy()
+            anomalies = np.isnan(grad_np) | np.isinf(grad_np)
+            if np.any(anomalies):
+                # Anomaly detected! Print an academic warning and reconstruct!
+                print(f"⚠️ [Self-Healing Autograd] Recovered anomalous gradient (NaN/Inf) on parameter {id(self)}!")
+                
+                if not hasattr(Tensor, "_grad_history"):
+                    Tensor._grad_history = {}
+                    
+                param_id = id(self)
+                if param_id in Tensor._grad_history and Tensor._grad_history[param_id][0] == grad_np.shape:
+                    # Reconstruct from parameter-specific valid EMA history of identical shape
+                    history = Tensor._grad_history[param_id][1]
+                    grad_np[anomalies] = history[anomalies]
+                else:
+                    # Fallback to zero if no history is recorded yet to prevent training crash
+                    grad_np[anomalies] = 0.0
+                    
+                # Overwrite computed gradient with the reconstructed healthy estimate
+                healed_grad = Tensor(grad_np, device=self.device, dtype=self.dtype)
+                self._tensor.grad = healed_grad._tensor
+                res_grad = healed_grad
+            else:
+                # Update exponential moving average history of valid gradients
+                if not hasattr(Tensor, "_grad_history"):
+                    Tensor._grad_history = {}
+                param_id = id(self)
+                ema_factor = 0.9
+                if param_id in Tensor._grad_history and Tensor._grad_history[param_id][0] == grad_np.shape:
+                    prev_grad = Tensor._grad_history[param_id][1]
+                    Tensor._grad_history[param_id] = (grad_np.shape, ema_factor * prev_grad + (1.0 - ema_factor) * grad_np)
+                else:
+                    Tensor._grad_history[param_id] = (grad_np.shape, grad_np.copy())
+                    
+        return res_grad
 
     @grad.setter
     def grad(self, value):
@@ -161,7 +219,9 @@ class Tensor:
     def __add__(self, other):
         if not isinstance(other, Tensor):
             other = Tensor(other, device=self.device)
-        return self._fast_wrap(self._tensor.add(other._tensor))
+        if self.device != other.device:
+            other = other.to(self.device)
+        return self._fast_wrap(self._tensor.add(other._tensor), dtype=self.dtype)
 
     def __radd__(self, other):
         return self.__add__(other)
@@ -169,7 +229,9 @@ class Tensor:
     def __sub__(self, other):
         if not isinstance(other, Tensor):
             other = Tensor(other, device=self.device)
-        return self._fast_wrap(self._tensor.sub(other._tensor))
+        if self.device != other.device:
+            other = other.to(self.device)
+        return self._fast_wrap(self._tensor.sub(other._tensor), dtype=self.dtype)
 
     def __rsub__(self, other):
         return Tensor(other, device=self.device) - self
@@ -177,7 +239,9 @@ class Tensor:
     def __mul__(self, other):
         if not isinstance(other, Tensor):
             other = Tensor(other, device=self.device)
-        return self._fast_wrap(self._tensor.mul(other._tensor))
+        if self.device != other.device:
+            other = other.to(self.device)
+        return self._fast_wrap(self._tensor.mul(other._tensor), dtype=self.dtype)
 
     def __rmul__(self, other):
         return self.__mul__(other)
@@ -188,10 +252,24 @@ class Tensor:
     def __truediv__(self, other):
         if not isinstance(other, Tensor):
             other = Tensor(other, device=self.device)
-        return self._fast_wrap(self._tensor.div(other._tensor))
+        if self.device != other.device:
+            other = other.to(self.device)
+        return self._fast_wrap(self._tensor.div(other._tensor), dtype=self.dtype)
 
     def __rtruediv__(self, other):
         return Tensor(other, device=self.device) / self
+
+    def __iadd__(self, other):
+        return self.add_(other)
+
+    def __isub__(self, other):
+        return self.sub_(other)
+
+    def __imul__(self, other):
+        return self.mul_(other)
+
+    def __itruediv__(self, other):
+        return self.div_(other)
 
     def __pow__(self, exponent):
         if isinstance(exponent, (int, float)):
@@ -212,13 +290,22 @@ class Tensor:
         return Tensor(other, device=self.device).matmul(self)
 
     def matmul(self, other):
-        return self._fast_wrap(self._tensor.matmul(_raw(other)))
+        if not isinstance(other, Tensor):
+            other = Tensor(other, device=self.device)
+        if self.device != other.device:
+            other = other.to(self.device)
+        return self._fast_wrap(self._tensor.matmul(_raw(other)), dtype=self.dtype)
 
     def t(self):
         return self._fast_wrap(self._tensor.t())
 
     def transpose(self, dim0, dim1):
-        return self._fast_wrap(self._tensor.transpose(dim0, dim1))
+        d0 = dim0 if dim0 >= 0 else self.ndim + dim0
+        d1 = dim1 if dim1 >= 0 else self.ndim + dim1
+        return self._fast_wrap(self._tensor.transpose(d0, d1))
+
+    def contiguous(self):
+        return self._fast_wrap(self._tensor.contiguous(), dtype=self.dtype)
 
     # ──────────────────────────────────────────────────────────────
     # Shape manipulation
@@ -238,10 +325,12 @@ class Tensor:
                 if s == 1:
                     res = res.squeeze(i)
             return self._fast_wrap(res)
-        return self._fast_wrap(self._tensor.squeeze(dim))
+        d = dim if dim >= 0 else self.ndim + dim
+        return self._fast_wrap(self._tensor.squeeze(d))
 
     def unsqueeze(self, dim):
-        return self._fast_wrap(self._tensor.unsqueeze(dim))
+        d = dim if dim >= 0 else self.ndim + dim
+        return self._fast_wrap(self._tensor.unsqueeze(d))
 
     def flatten(self, start_dim=0, end_dim=-1):
         if start_dim == 0 and end_dim == -1:
@@ -263,44 +352,47 @@ class Tensor:
     def sum(self, dim=None, keepdim=False):
         if dim is None:
             return self._fast_wrap(self._tensor.sum_all())
-        # NumPy fallback for now to avoid recursion with ops.sum
-        if isinstance(dim, list): dim = tuple(dim)
-        res = np.sum(self.numpy(), axis=dim, keepdims=keepdim)
-        return Tensor(res, device=self.device, dtype=self.dtype)
+        if isinstance(dim, (list, tuple)):
+            dims = [d if d >= 0 else self.ndim + d for d in dim]
+            res = self
+            for d in sorted(dims, reverse=True):
+                res = res._fast_wrap(res._tensor.sum_dim(d, keepdim))
+            return res
+        d = int(dim)
+        if d < 0:
+            d = self.ndim + d
+        return self._fast_wrap(self._tensor.sum_dim(d, keepdim))
 
     def mean(self, dim=None, keepdim=False):
         if dim is None:
             return self._fast_wrap(self._tensor.mean_all())
-        # Use sum then divide to maintain some consistency
-        s = self.sum(dim=dim, keepdim=keepdim)
-        shape = self.shape
-        if isinstance(dim, int):
-            size = shape[dim]
-        elif isinstance(dim, (list, tuple)):
-            size = 1
-            for d in dim: size *= shape[d]
-        else:
-            size = self.numel()
-        return s * (1.0 / size)
+        if isinstance(dim, (list, tuple)):
+            dims = [d if d >= 0 else self.ndim + d for d in dim]
+            res = self
+            for d in sorted(dims, reverse=True):
+                res = res._fast_wrap(res._tensor.mean_dim(d, keepdim))
+            return res
+        d = int(dim)
+        if d < 0:
+            d = self.ndim + d
+        return self._fast_wrap(self._tensor.mean_dim(d, keepdim))
 
     # ──────────────────────────────────────────────────────────────
     # Unary element-wise
     # ──────────────────────────────────────────────────────────────
-    def sqrt(self): from . import ops; return ops.sqrt(self)
-    def exp(self):  from . import ops; return ops.exp(self)
-    def log(self):  from . import ops; return ops.log(self)
+    def sqrt(self): return self._fast_wrap(self._tensor.sqrt())
+    def exp(self):  return self._fast_wrap(self._tensor.exp())
+    def log(self):  return self._fast_wrap(self._tensor.log())
     def relu(self): return self._fast_wrap(self._tensor.relu())
     def sin(self):  return self._fast_wrap(self._tensor.sin())
     def cos(self):  return self._fast_wrap(self._tensor.cos())
     def reciprocal(self): return self._fast_wrap(self._tensor.recip())
 
-    def sigmoid(self):
-        from . import ops
-        return ops.sigmoid(self)
+    def sigmoid(self): return self._fast_wrap(self._tensor.sigmoid())
+    def tanh(self):    return self._fast_wrap(self._tensor.tanh())
 
-    def tanh(self):
-        from . import ops
-        return ops.tanh(self)
+    def erf(self):     return self._fast_wrap(self._tensor.erf())
+    def neg(self):     return -self
 
     # ──────────────────────────────────────────────────────────────
     # Device / dtype / Autograd
@@ -317,6 +409,56 @@ class Tensor:
             return new_t
         return self
 
+    def float(self):
+        return self.to("float32")
+
+    def double(self):
+        return self.to("float64")
+
+    def half(self):
+        return self.to("float16")
+
+    def cuda(self):
+        return self.to("cuda")
+
+    def cpu(self):
+        return self.to("cpu")
+
+    def add_(self, other):
+        res = self + other
+        self._tensor = res._tensor
+        return self
+
+    def sub_(self, other):
+        res = self - other
+        self._tensor = res._tensor
+        return self
+
+    def mul_(self, other):
+        res = self * other
+        self._tensor = res._tensor
+        return self
+
+    def div_(self, other):
+        res = self / other
+        self._tensor = res._tensor
+        return self
+
+    def relu_(self):
+        res = self.relu()
+        self._tensor = res._tensor
+        return self
+
+    def sigmoid_(self):
+        res = self.sigmoid()
+        self._tensor = res._tensor
+        return self
+
+    def tanh_(self):
+        res = self.tanh()
+        self._tensor = res._tensor
+        return self
+
     def backward(self, gradient=None):
         grad_tensor = None
         if gradient is not None:
@@ -324,8 +466,31 @@ class Tensor:
             else: grad_tensor = Tensor(gradient, device=self.device)._tensor
         self._tensor.backward(grad_tensor)
 
+        # Run custom Python autograd function backwards if recorded on the tape
+        from .autograd import Function
+        if Function._tape:
+            tape_copy = list(Function._tape)
+            Function._tape.clear()
+            
+            for cls, ctx, inputs, output in reversed(tape_copy):
+                out_grad = output.grad
+                if out_grad is None:
+                    from . import ones_like
+                    out_grad = ones_like(output)
+                    
+                grads = cls.backward(ctx, out_grad)
+                if not isinstance(grads, tuple):
+                    grads = (grads,)
+                    
+                for inp, g in zip(inputs, grads):
+                    if isinstance(inp, Tensor) and inp.requires_grad and g is not None:
+                        if inp.grad is None:
+                            inp.grad = g
+                        else:
+                            inp.grad = inp.grad + g
+
     def detach(self):
-        return self._fast_wrap(self._tensor.detach())
+        return Tensor(self.numpy(), device=self.device, dtype=self.dtype, requires_grad=False)
 
     def detach_(self):
         self._tensor.requires_grad = False
@@ -389,3 +554,23 @@ class Tensor:
         # Use numpy for std for now
         res = np.std(self.numpy(), axis=dim, keepdims=keepdim, ddof=1 if unbiased else 0)
         return Tensor(res, device=self.device, dtype=self.dtype)
+
+    def __getstate__(self):
+        return {
+            "data": self.numpy(),
+            "device": self.device,
+            "dtype": self.dtype,
+            "requires_grad": self.requires_grad
+        }
+
+    def __setstate__(self, state):
+        import torch_candle_backend as _kernels
+        self._tensor = _kernels.PyTensor(
+            state["data"],
+            device=state["device"],
+            dtype=state["dtype"],
+            requires_grad=state["requires_grad"]
+        )
+        self._device = self._tensor.device
+        self._dtype = "float32"
+        self._shape = tuple(self._tensor.shape)

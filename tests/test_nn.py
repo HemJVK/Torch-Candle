@@ -51,5 +51,28 @@ def test_training_step():
     # dL/dw = dL/dpred * dpred/dw = 2*(pred-y) * x = 2*(5-2) * 1 = 6
     assert model.weight.grad.item() == 6.0
 
+
+def test_new_losses_and_pooling():
+    # L1Loss
+    l1 = nn.L1Loss()
+    x = torch.Tensor([1.0, 2.0])
+    y = torch.Tensor([0.0, 0.0])
+    assert l1(x, y).item() == 1.5
+    
+    # BCELoss
+    bce = nn.BCELoss()
+    pred = torch.Tensor([0.1, 0.9])
+    target = torch.Tensor([0.0, 1.0])
+    loss = bce(pred, target)
+    expected_loss = -(np.log(0.9) + np.log(0.9)) / 2
+    assert np.allclose(loss.item(), expected_loss, atol=1e-5)
+    
+    # AdaptiveAvgPool2d
+    pool = nn.AdaptiveAvgPool2d(1)
+    inp = torch.Tensor([[[[1.0, 2.0], [3.0, 4.0]]]])
+    out = pool(inp)
+    assert out.shape == (1, 1, 1, 1)
+    assert out.item() == 2.5
+
 if __name__ == "__main__":
     pytest.main([__file__])

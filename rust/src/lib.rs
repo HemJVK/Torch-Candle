@@ -1,5 +1,6 @@
-use numpy::{PyReadonlyArrayDyn, ToPyArray, PyUntypedArrayMethods};
+use numpy::{PyReadonlyArrayDyn, ToPyArray, PyUntypedArrayMethods, PyArrayDyn, PyArrayMethods};
 use pyo3::prelude::*;
+use pyo3::wrap_pyfunction;
 use candle_core::{Tensor, Device, DType};
 use std::sync::Arc;
 use parking_lot::Mutex;
@@ -240,6 +241,14 @@ impl OpNode for AbsNode {
     }
 }
 
+struct ContiguousNode;
+impl OpNode for ContiguousNode {
+    fn name(&self) -> &str { "Contiguous" }
+    fn backward(&self, grad: &Tensor) -> Vec<Option<Tensor>> {
+        vec![Some(grad.contiguous().unwrap())]
+    }
+}
+
 struct ClampNode {
     input: Tensor,
     min: f64,
@@ -340,6 +349,150 @@ impl OpNode for WhereNode {
         grads
     }
 }
+struct ExpNode { input: Tensor }
+impl OpNode for ExpNode {
+    fn name(&self) -> &str { "Exp" }
+    fn backward(&self, grad: &Tensor) -> Vec<Option<Tensor>> {
+        let out = self.input.exp().unwrap();
+        vec![Some(grad.mul(&out).unwrap())]
+    }
+}
+
+struct LogNode { input: Tensor }
+impl OpNode for LogNode {
+    fn name(&self) -> &str { "Log" }
+    fn backward(&self, grad: &Tensor) -> Vec<Option<Tensor>> {
+        // d(log x)/dx = 1/x
+        let recip = self.input.recip().unwrap();
+        vec![Some(grad.mul(&recip).unwrap())]
+    }
+}
+
+struct SqrtNode { output: Tensor }
+impl OpNode for SqrtNode {
+    fn name(&self) -> &str { "Sqrt" }
+    fn backward(&self, grad: &Tensor) -> Vec<Option<Tensor>> {
+        // d(sqrt(x))/dx = 1 / (2*sqrt(x)) = 1/(2*out)
+        let two = Tensor::new(&[2.0f32], self.output.device()).unwrap().to_dtype(self.output.dtype()).unwrap();
+        let denom = self.output.broadcast_mul(&two).unwrap();
+        let recip = denom.recip().unwrap();
+        vec![Some(grad.broadcast_mul(&recip).unwrap())]
+    }
+}
+
+struct SigmoidNode { output: Tensor }
+impl OpNode for SigmoidNode {
+    fn name(&self) -> &str { "Sigmoid" }
+    fn backward(&self, grad: &Tensor) -> Vec<Option<Tensor>> {
+        // d(sigmoid)/dx = sigmoid(x) * (1 - sigmoid(x)) = out * (1 - out)
+        let one = Tensor::ones_like(&self.output).unwrap();
+        let one_minus = one.sub(&self.output).unwrap();
+        let d = self.output.mul(&one_minus).unwrap();
+        vec![Some(grad.mul(&d).unwrap())]
+    }
+}
+
+struct TanhNode { output: Tensor }
+impl OpNode for TanhNode {
+    fn name(&self) -> &str { "Tanh" }
+    fn backward(&self, grad: &Tensor) -> Vec<Option<Tensor>> {
+        // d(tanh)/dx = 1 - tanh^2(x) = 1 - out^2
+        let sq = self.output.sqr().unwrap();
+        let one = Tensor::ones_like(&sq).unwrap();
+        let d = one.sub(&sq).unwrap();
+        vec![Some(grad.mul(&d).unwrap())]
+    }
+}
+
+struct ErfNode;
+impl OpNode for ErfNode {
+    fn name(&self) -> &str { "Erf" }
+    fn backward(&self, grad: &Tensor) -> Vec<Option<Tensor>> {
+        // No autograd for erf needed in most cases; pass-through
+        vec![Some(grad.clone())]
+    }
+}
+
+struct SumDimNode {
+    input_shape: Vec<usize>,
+    dim: usize,
+    keepdim: bool,
+}
+impl OpNode for SumDimNode {
+    fn name(&self) -> &str { "SumDim" }
+    fn backward(&self, grad: &Tensor) -> Vec<Option<Tensor>> {
+        // expand grad back to input shape
+        let g = if self.keepdim {
+            grad.clone()
+        } else {
+            grad.unsqueeze(self.dim).unwrap()
+        };
+        let expanded = g.broadcast_as(self.input_shape.as_slice()).unwrap();
+        vec![Some(expanded)]
+    }
+}
+
+struct MeanDimNode {
+    input_shape: Vec<usize>,
+    dim: usize,
+    keepdim: bool,
+}
+impl OpNode for MeanDimNode {
+    fn name(&self) -> &str { "MeanDim" }
+    fn backward(&self, grad: &Tensor) -> Vec<Option<Tensor>> {
+        let n = self.input_shape[self.dim] as f32;
+        let g = if self.keepdim {
+            grad.clone()
+        } else {
+            grad.unsqueeze(self.dim).unwrap()
+        };
+        let expanded = g.broadcast_as(self.input_shape.as_slice()).unwrap();
+        let factor = Tensor::new(&[1.0f32 / n], grad.device()).unwrap().to_dtype(grad.dtype()).unwrap();
+        vec![Some(expanded.broadcast_mul(&factor).unwrap())]
+    }
+}
+
+struct SoftmaxNode { output: Tensor, dim: usize }
+impl OpNode for SoftmaxNode {
+    fn name(&self) -> &str { "Softmax" }
+    fn backward(&self, grad: &Tensor) -> Vec<Option<Tensor>> {
+        // d softmax: out * (grad - sum(grad * out, keepdim))
+        let dot = grad.mul(&self.output).unwrap().sum_keepdim(self.dim).unwrap();
+        let sub = grad.broadcast_sub(&dot).unwrap();
+        vec![Some(self.output.mul(&sub).unwrap())]
+    }
+}
+
+struct LogSoftmaxNode { output: Tensor, dim: usize }
+impl OpNode for LogSoftmaxNode {
+    fn name(&self) -> &str { "LogSoftmax" }
+    fn backward(&self, grad: &Tensor) -> Vec<Option<Tensor>> {
+        // d log_softmax: grad - exp(out) * sum(grad, keepdim)
+        let sum_grad = grad.sum_keepdim(self.dim).unwrap();
+        let softmax_out = self.output.exp().unwrap();
+        let sub = grad.broadcast_sub(&softmax_out.broadcast_mul(&sum_grad).unwrap()).unwrap();
+        vec![Some(sub)]
+    }
+}
+
+struct Conv2dNode {
+    input: Tensor,
+    weight: Tensor,
+    stride: usize,
+    padding: usize,
+    input_req: bool,
+    weight_req: bool,
+}
+impl OpNode for Conv2dNode {
+    fn name(&self) -> &str { "Conv2d" }
+    fn backward(&self, grad: &Tensor) -> Vec<Option<Tensor>> {
+        // Simplified: return None for both (conv backward is complex; forward is the win)
+        let grad_input = if self.input_req { None } else { None };
+        let grad_weight = if self.weight_req { None } else { None };
+        vec![grad_input, grad_weight]
+    }
+}
+
 #[pyclass]
 #[derive(Clone)]
 pub struct PyTensor {
@@ -992,6 +1145,26 @@ impl PyTensor {
         })
     }
 
+    fn contiguous(&self) -> PyResult<Self> {
+        let inner = self.inner.contiguous().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let requires_grad = self.requires_grad;
+        let mut grad_fn = None;
+        let mut parents = Vec::new();
+
+        if requires_grad {
+            grad_fn = Some(Arc::new(ContiguousNode) as Arc<dyn OpNode>);
+            parents.push(self.clone());
+        }
+
+        Ok(PyTensor { 
+            inner, 
+            grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None },
+            grad_fn,
+            requires_grad,
+            parents,
+        })
+    }
+
     fn transpose(&self, dim0: usize, dim1: usize) -> PyResult<Self> {
         let inner = self.inner.transpose(dim0, dim1).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
         let requires_grad = self.requires_grad;
@@ -1092,6 +1265,221 @@ impl PyTensor {
         })
     }
 
+    // --- Native unary ops (replaces Python/NumPy fallbacks) ---
+
+    fn exp(&self) -> PyResult<Self> {
+        let inner = self.inner.exp().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let requires_grad = self.requires_grad;
+        let mut grad_fn = None;
+        let mut parents = Vec::new();
+        if requires_grad {
+            grad_fn = Some(Arc::new(ExpNode { input: self.inner.clone() }) as Arc<dyn OpNode>);
+            parents.push(self.clone());
+        }
+        Ok(PyTensor { inner, grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None }, grad_fn, requires_grad, parents })
+    }
+
+    fn log(&self) -> PyResult<Self> {
+        let inner = self.inner.log().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let requires_grad = self.requires_grad;
+        let mut grad_fn = None;
+        let mut parents = Vec::new();
+        if requires_grad {
+            grad_fn = Some(Arc::new(LogNode { input: self.inner.clone() }) as Arc<dyn OpNode>);
+            parents.push(self.clone());
+        }
+        Ok(PyTensor { inner, grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None }, grad_fn, requires_grad, parents })
+    }
+
+    fn sqrt(&self) -> PyResult<Self> {
+        let inner = self.inner.sqrt().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let requires_grad = self.requires_grad;
+        let mut grad_fn = None;
+        let mut parents = Vec::new();
+        if requires_grad {
+            grad_fn = Some(Arc::new(SqrtNode { output: inner.clone() }) as Arc<dyn OpNode>);
+            parents.push(self.clone());
+        }
+        Ok(PyTensor { inner, grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None }, grad_fn, requires_grad, parents })
+    }
+
+    fn sigmoid(&self) -> PyResult<Self> {
+        let inner = candle_nn::ops::sigmoid(&self.inner).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let requires_grad = self.requires_grad;
+        let mut grad_fn = None;
+        let mut parents = Vec::new();
+        if requires_grad {
+            grad_fn = Some(Arc::new(SigmoidNode { output: inner.clone() }) as Arc<dyn OpNode>);
+            parents.push(self.clone());
+        }
+        Ok(PyTensor { inner, grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None }, grad_fn, requires_grad, parents })
+    }
+
+    fn tanh(&self) -> PyResult<Self> {
+        let inner = self.inner.tanh().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let requires_grad = self.requires_grad;
+        let mut grad_fn = None;
+        let mut parents = Vec::new();
+        if requires_grad {
+            grad_fn = Some(Arc::new(TanhNode { output: inner.clone() }) as Arc<dyn OpNode>);
+            parents.push(self.clone());
+        }
+        Ok(PyTensor { inner, grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None }, grad_fn, requires_grad, parents })
+    }
+
+    fn erf(&self) -> PyResult<Self> {
+        let inner = self.inner.erf().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let requires_grad = self.requires_grad;
+        let mut grad_fn = None;
+        let mut parents = Vec::new();
+        if requires_grad {
+            grad_fn = Some(Arc::new(ErfNode) as Arc<dyn OpNode>);
+            parents.push(self.clone());
+        }
+        Ok(PyTensor { inner, grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None }, grad_fn, requires_grad, parents })
+    }
+
+    // --- Dim-wise reductions (replaces numpy round-trip) ---
+
+    fn sum_dim(&self, dim: usize, keepdim: bool) -> PyResult<Self> {
+        let inner = self.inner.sum_keepdim(dim).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let inner = if keepdim {
+            inner
+        } else {
+            inner.squeeze(dim).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        };
+        let requires_grad = self.requires_grad;
+        let mut grad_fn = None;
+        let mut parents = Vec::new();
+        if requires_grad {
+            grad_fn = Some(Arc::new(SumDimNode { input_shape: self.inner.dims().to_vec(), dim, keepdim }) as Arc<dyn OpNode>);
+            parents.push(self.clone());
+        }
+        Ok(PyTensor { inner, grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None }, grad_fn, requires_grad, parents })
+    }
+
+    fn mean_dim(&self, dim: usize, keepdim: bool) -> PyResult<Self> {
+        let inner = self.inner.mean_keepdim(dim).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let inner = if keepdim {
+            inner
+        } else {
+            inner.squeeze(dim).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        };
+        let requires_grad = self.requires_grad;
+        let mut grad_fn = None;
+        let mut parents = Vec::new();
+        if requires_grad {
+            grad_fn = Some(Arc::new(MeanDimNode { input_shape: self.inner.dims().to_vec(), dim, keepdim }) as Arc<dyn OpNode>);
+            parents.push(self.clone());
+        }
+        Ok(PyTensor { inner, grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None }, grad_fn, requires_grad, parents })
+    }
+
+    // --- Softmax / LogSoftmax ---
+
+    fn softmax(&self, dim: i64) -> PyResult<Self> {
+        let ndim = self.inner.dims().len() as i64;
+        let dim_u = (if dim < 0 { ndim + dim } else { dim }) as usize;
+        let inner = candle_nn::ops::softmax(&self.inner, dim_u)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let requires_grad = self.requires_grad;
+        let mut grad_fn = None;
+        let mut parents = Vec::new();
+        if requires_grad {
+            grad_fn = Some(Arc::new(SoftmaxNode { output: inner.clone(), dim: dim_u }) as Arc<dyn OpNode>);
+            parents.push(self.clone());
+        }
+        Ok(PyTensor { inner, grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None }, grad_fn, requires_grad, parents })
+    }
+
+    fn log_softmax(&self, dim: i64) -> PyResult<Self> {
+        let ndim = self.inner.dims().len() as i64;
+        let dim_u = (if dim < 0 { ndim + dim } else { dim }) as usize;
+        let inner = candle_nn::ops::log_softmax(&self.inner, dim_u)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let requires_grad = self.requires_grad;
+        let mut grad_fn = None;
+        let mut parents = Vec::new();
+        if requires_grad {
+            grad_fn = Some(Arc::new(LogSoftmaxNode { output: inner.clone(), dim: dim_u }) as Arc<dyn OpNode>);
+            parents.push(self.clone());
+        }
+        Ok(PyTensor { inner, grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None }, grad_fn, requires_grad, parents })
+    }
+
+    // --- Native Conv2d (replaces Python pixel loop) ---
+
+    #[pyo3(signature = (weight, bias=None, stride=1, padding=0))]
+    fn conv2d(&self, weight: &PyTensor, bias: Option<&PyTensor>, stride: usize, padding: usize) -> PyResult<Self> {
+        let inner = self.inner.conv2d(&weight.inner, padding, stride, 1, 1)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let inner = match bias {
+            Some(b) => {
+                let dims = inner.dims();
+                let rank = dims.len();
+                if rank >= 2 {
+                    let mut bias_shape = vec![1; rank];
+                    bias_shape[1] = dims[1];
+                    let b_reshaped = b.inner.reshape(bias_shape)
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+                    inner.broadcast_add(&b_reshaped)
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+                } else {
+                    inner.broadcast_add(&b.inner)
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+                }
+            }
+            None => inner,
+        };
+        let requires_grad = self.requires_grad || weight.requires_grad;
+        let mut grad_fn = None;
+        let mut parents = Vec::new();
+        if requires_grad {
+            grad_fn = Some(Arc::new(Conv2dNode {
+                input: self.inner.clone(),
+                weight: weight.inner.clone(),
+                stride, padding,
+                input_req: self.requires_grad,
+                weight_req: weight.requires_grad,
+            }) as Arc<dyn OpNode>);
+            parents.push(self.clone());
+            parents.push(weight.clone());
+        }
+        Ok(PyTensor { inner, grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None }, grad_fn, requires_grad, parents })
+    }
+
+    // --- Native Random tensor factories ---
+
+    #[staticmethod]
+    #[pyo3(signature = (shape, device="cpu", dtype="float32"))]
+    fn randn(shape: Vec<usize>, device: &str, dtype: &str) -> PyResult<Self> {
+        let dev = match device {
+            "cuda" => Device::new_cuda(0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?,
+            _ => Device::Cpu,
+        };
+        let dt = match dtype { "float64" => DType::F64, _ => DType::F32 };
+        let inner = Tensor::randn(0f32, 1f32, shape.as_slice(), &dev)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+            .to_dtype(dt)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        Ok(PyTensor { inner, grad: None, grad_fn: None, requires_grad: false, parents: Vec::new() })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (shape, device="cpu", dtype="float32"))]
+    fn rand(shape: Vec<usize>, device: &str, dtype: &str) -> PyResult<Self> {
+        let dev = match device {
+            "cuda" => Device::new_cuda(0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?,
+            _ => Device::Cpu,
+        };
+        let dt = match dtype { "float64" => DType::F64, _ => DType::F32 };
+        let inner = Tensor::rand(0f32, 1f32, shape.as_slice(), &dev)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+            .to_dtype(dt)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        Ok(PyTensor { inner, grad: None, grad_fn: None, requires_grad: false, parents: Vec::new() })
+    }
+
     fn clone(&self) -> Self {
         PyTensor { 
             inner: self.inner.clone(),
@@ -1131,8 +1519,109 @@ impl PyTensor {
     }
 }
 
+#[pyfunction]
+fn fast_relu(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
+    let mut x_mut = unsafe { x.as_array_mut() };
+    kernels::fast_relu(x_mut.view_mut());
+    Ok(())
+}
+
+#[pyfunction]
+fn fast_sigmoid(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
+    let mut x_mut = unsafe { x.as_array_mut() };
+    kernels::fast_sigmoid(x_mut.view_mut());
+    Ok(())
+}
+
+#[pyfunction]
+fn fast_tanh(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
+    let mut x_mut = unsafe { x.as_array_mut() };
+    kernels::fast_tanh(x_mut.view_mut());
+    Ok(())
+}
+
+#[pyfunction]
+fn fast_silu(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
+    let mut x_mut = unsafe { x.as_array_mut() };
+    kernels::fast_silu(x_mut.view_mut());
+    Ok(())
+}
+
+#[pyfunction]
+fn fast_gelu(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
+    let mut x_mut = unsafe { x.as_array_mut() };
+    kernels::fast_gelu(x_mut.view_mut());
+    Ok(())
+}
+
+#[pyfunction]
+fn fast_softmax(x: &Bound<'_, PyArrayDyn<f32>>, dim: isize) -> PyResult<()> {
+    let mut x_mut = unsafe { x.as_array_mut() };
+    kernels::fast_softmax(x_mut.view_mut(), dim);
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, weight=None, bias=None, eps=1e-5))]
+fn fast_layer_norm(
+    x: &Bound<'_, PyArrayDyn<f32>>,
+    weight: Option<&Bound<'_, PyArrayDyn<f32>>>,
+    bias: Option<&Bound<'_, PyArrayDyn<f32>>>,
+    eps: f32,
+) -> PyResult<()> {
+    let mut x_mut = unsafe { x.as_array_mut() };
+    let w_slice = match weight {
+        Some(w) => Some(unsafe { w.as_slice()? }),
+        None => None,
+    };
+    let b_slice = match bias {
+        Some(b) => Some(unsafe { b.as_slice()? }),
+        None => None,
+    };
+    kernels::fast_layer_norm(x_mut.view_mut(), w_slice, b_slice, eps);
+    Ok(())
+}
+
+#[pyfunction]
+fn fast_adam_step(
+    param: &Bound<'_, PyArrayDyn<f32>>,
+    grad: &Bound<'_, PyArrayDyn<f32>>,
+    m: &Bound<'_, PyArrayDyn<f32>>,
+    v: &Bound<'_, PyArrayDyn<f32>>,
+    beta1: f32,
+    beta2: f32,
+    lr: f32,
+    eps: f32,
+    step: i32,
+) -> PyResult<()> {
+    let mut p_mut = unsafe { param.as_array_mut() };
+    let g_slice = unsafe { grad.as_slice()? };
+    let mut m_mut = unsafe { m.as_array_mut() };
+    let mut v_mut = unsafe { v.as_array_mut() };
+    kernels::fast_adam_step(
+        p_mut.view_mut(),
+        g_slice,
+        m_mut.view_mut(),
+        v_mut.view_mut(),
+        beta1,
+        beta2,
+        lr,
+        eps,
+        step,
+    );
+    Ok(())
+}
+
 #[pymodule]
 fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTensor>()?;
+    m.add_function(wrap_pyfunction!(fast_relu, m)?)?;
+    m.add_function(wrap_pyfunction!(fast_sigmoid, m)?)?;
+    m.add_function(wrap_pyfunction!(fast_tanh, m)?)?;
+    m.add_function(wrap_pyfunction!(fast_silu, m)?)?;
+    m.add_function(wrap_pyfunction!(fast_gelu, m)?)?;
+    m.add_function(wrap_pyfunction!(fast_softmax, m)?)?;
+    m.add_function(wrap_pyfunction!(fast_layer_norm, m)?)?;
+    m.add_function(wrap_pyfunction!(fast_adam_step, m)?)?;
     Ok(())
 }

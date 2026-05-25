@@ -23,19 +23,47 @@ def backward(tensors, grad_tensors=None, retain_graph=None, create_graph=False, 
     for t, g in zip(tensors, grad_tensors):
         t.backward(g)
 
+class Context:
+    def __init__(self):
+        self.saved_tensors = []
+
+    def save_for_backward(self, *tensors):
+        self.saved_tensors.extend(tensors)
+
+
 class Function:
     """
     Base class to create custom autograd functions.
-    In torch_candle, the native graph handles most operations, 
-    but this stub exists for PyTorch API compatibility.
+    Supports standard forward/backward method definitions.
     """
-    @staticmethod
-    def forward(ctx, *args, **kwargs):
-        raise NotImplementedError
+    _tape = []
+
+    @classmethod
+    def apply(cls, *args, **kwargs):
+        ctx = Context()
+        requires_grad = any(
+            isinstance(arg, Tensor) and arg.requires_grad for arg in args
+        )
         
-    @staticmethod
-    def backward(ctx, *grad_outputs):
-        raise NotImplementedError
+        detached_args = []
+        for arg in args:
+            if isinstance(arg, Tensor):
+                detached_args.append(arg.detach())
+            else:
+                detached_args.append(arg)
+                
+        out_val = cls.forward(ctx, *detached_args, **kwargs)
+        
+        if not isinstance(out_val, Tensor):
+            out_val = Tensor(out_val)
+            
+        if requires_grad and Tensor._grad_enabled:
+            out_val.requires_grad = True
+            # Store on the execution tape
+            Function._tape.append((cls, ctx, args, out_val))
+            
+        return out_val
+
 
 class SavedTensor:
     """Stub for saved tensor."""

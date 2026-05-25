@@ -108,7 +108,7 @@ def pow(input, exponent, out=None):
 
 
 def exp(input, out=None):
-    return Tensor(np.exp(_np(_wrap(input))).astype(np.float32))
+    return _wrap(input).exp()
 
 
 def exp2(input, out=None):
@@ -116,7 +116,7 @@ def exp2(input, out=None):
 
 
 def log(input, out=None):
-    return Tensor(np.log(_np(_wrap(input))).astype(np.float32))
+    return _wrap(input).log()
 
 
 def log2(input, out=None):
@@ -132,7 +132,7 @@ def log1p(input, out=None):
 
 
 def sqrt(input, out=None):
-    return Tensor(np.sqrt(_np(_wrap(input))).astype(np.float32))
+    return _wrap(input).sqrt()
 
 
 def rsqrt(input, out=None):
@@ -144,7 +144,7 @@ def reciprocal(input, out=None):
 
 
 def abs(input, out=None):
-    return Tensor(np.abs(_np(_wrap(input))).astype(np.float32))
+    return _wrap(input)._fast_wrap(_wrap(input)._tensor.abs())
 
 
 absolute = abs
@@ -252,8 +252,7 @@ def atanh(input, out=None):        # numpy fallback
 # ─── Activations ─────────────────────────────────────────────────────────────
 
 def sigmoid(input, out=None):
-    res = 1.0 / (1.0 + np.exp(-_np(_wrap(input))))
-    return Tensor(np.array(res).astype(np.float32))
+    return _wrap(input).sigmoid()
 
 
 def relu(input):
@@ -263,7 +262,11 @@ def relu(input):
 # ─── clamp ───────────────────────────────────────────────────────────────────
 
 def clamp(input, min=None, max=None, out=None):
-    return Tensor(np.clip(_np(_wrap(input)), min, max).astype(np.float32))
+    t = _wrap(input)
+    if min is not None and max is not None:
+        return t._fast_wrap(t._tensor.clamp(_builtins.float(min), _builtins.float(max)))
+    # one-sided clamp: numpy fallback
+    return Tensor(np.clip(_np(t), min, max).astype(np.float32))
 
 
 clip = clamp
@@ -283,10 +286,7 @@ def lerp(input, end, weight):
 
 
 def erf(input, out=None):
-    # numpy fallback — no candle equivalent
-    x   = _np(_wrap(input))
-    erf_vec = np.vectorize(math.erf)
-    return Tensor(erf_vec(x).astype(np.float32))
+    return _wrap(input).erf()
 
 
 def erfinv(input):               # numpy fallback
@@ -698,8 +698,7 @@ def detach(input):
 
 
 def contiguous(input):
-    # PyTensor contiguous is a no-op currently but exposed for API
-    return Tensor(_raw(_wrap(input)).clone())
+    return _wrap(input).contiguous()
 
 
 def type_as(input, other):

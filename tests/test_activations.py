@@ -24,3 +24,31 @@ def test_softmax():
     
     expected = np.exp([1.0, 2.0, 3.0]) / np.sum(np.exp([1.0, 2.0, 3.0]))
     assert np.allclose(out.numpy(), expected, atol=1e-5)
+
+
+def test_new_activations():
+    x = torch.tensor([-2.0, 0.0, 2.0])
+    
+    # Tanh
+    tanh = nn.Tanh()
+    assert np.allclose(tanh(x).numpy(), np.tanh([-2.0, 0.0, 2.0]), atol=1e-5)
+    
+    # LeakyReLU
+    leaky = nn.LeakyReLU(negative_slope=0.1)
+    assert np.allclose(leaky(x).numpy(), np.array([-0.2, 0.0, 2.0]), atol=1e-5)
+    
+    # ELU
+    elu = nn.ELU(alpha=1.0)
+    expected_elu = np.array([1.0 * (np.exp(-2.0) - 1.0), 0.0, 2.0], dtype=np.float32)
+    assert np.allclose(elu(x).numpy(), expected_elu, atol=1e-5)
+    
+    # SELU
+    selu = nn.SELU()
+    _alpha = 1.6732632423543772
+    _scale = 1.0507009873554805
+    expected_selu = np.array([_alpha * (np.exp(-2.0) - 1.0), 0.0, 2.0], dtype=np.float32) * _scale
+    assert np.allclose(selu(x).numpy(), expected_selu, atol=1e-5)
+    
+    # PReLU
+    prelu = nn.PReLU(num_parameters=1, init=0.5)
+    assert np.allclose(prelu(x).numpy(), np.array([-1.0, 0.0, 2.0], dtype=np.float32), atol=1e-5)
