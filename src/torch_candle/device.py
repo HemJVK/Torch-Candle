@@ -15,10 +15,12 @@ class device:
         # Map to candle device string
         if self.type == 'cpu':
             self._candle_device = 'cpu'
-        elif self.type == 'cuda':
+        elif self.type == 'cuda' or self.type == 'rocm':
             self._candle_device = f'cuda:{self.index}' if self.index is not None else 'cuda'
         elif self.type == 'mps':
             self._candle_device = 'metal'
+        elif self.type == 'xpu':
+            self._candle_device = 'cpu'  # Fallback to cpu in candle core for xpu
         else:
             self._candle_device = self.type
 

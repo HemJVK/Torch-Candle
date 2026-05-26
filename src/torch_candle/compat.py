@@ -45,6 +45,33 @@ def enable_torch_compat():
         sys.modules['torch.utils'] = torch_candle.utils
         if hasattr(torch_candle.utils, 'data'):
             sys.modules['torch.utils.data'] = torch_candle.utils.data
+            
+    if hasattr(torch_candle, 'multiprocessing'):
+        sys.modules['torch.multiprocessing'] = torch_candle.multiprocessing
+        
+    if hasattr(torch_candle, 'func'):
+        sys.modules['torch.func'] = torch_candle.func
+        
+    if hasattr(torch_candle, 'jit'):
+        sys.modules['torch.jit'] = torch_candle.jit
+        
+    if hasattr(torch_candle, 'c10'):
+        sys.modules['torch.c10'] = torch_candle.c10
+        
+    if hasattr(torch_candle, 'aten'):
+        sys.modules['torch.aten'] = torch_candle.aten
+        
+    if hasattr(torch_candle, 'caffe2'):
+        sys.modules['torch.caffe2'] = torch_candle.caffe2
+        
+    if hasattr(torch_candle, 'torchgen'):
+        sys.modules['torch.torchgen'] = torch_candle.torchgen
+        
+    if hasattr(torch_candle, 'distributed'):
+        sys.modules['torch.distributed'] = torch_candle.distributed
+        
+    if hasattr(torch_candle, 'backends'):
+        sys.modules['torch.backends'] = torch_candle.backends
 
     print("=" * 80)
     print("🚀 torch-candle: PyTorch drop-in compatibility enabled successfully!")

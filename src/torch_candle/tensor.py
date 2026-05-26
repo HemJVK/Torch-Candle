@@ -14,7 +14,7 @@ class Tensor:
     """torch_candle.Tensor — thin wrapper around candle.Tensor (Rust via PyO3).
     """
 
-    __slots__ = ['_tensor', '_device', '_dtype', '_shape', '_id']
+    __slots__ = ['_tensor', '_device', '_dtype', '_shape', '_id', '_shm']
 
     _grad_enabled = True  # toggled by torch.no_grad()
 
@@ -59,6 +59,8 @@ class Tensor:
         self._dtype = dtype
         self._shape = tuple(self._tensor.shape)
 
+        self._shm = None
+
         # Unique ID for graph compiler tracing
         if not hasattr(Tensor, "_id_counter"):
             Tensor._id_counter = 0
@@ -73,6 +75,8 @@ class Tensor:
         obj._device = rust_tensor.device
         obj._dtype = dtype
         obj._shape = tuple(rust_tensor.shape)
+
+        obj._shm = None
 
         # Unique ID for graph compiler tracing
         if not hasattr(Tensor, "_id_counter"):
@@ -114,7 +118,11 @@ class Tensor:
 
     @requires_grad.setter
     def requires_grad(self, value):
-        self._tensor.requires_grad = bool(value)
+        val = bool(value)
+        self._tensor.requires_grad = val
+        if val:
+            import torch_candle_backend as _kernels
+            self._tensor = _kernels.PyTensor(self.numpy(), device=self.device, dtype=self.dtype, requires_grad=True)
 
     @property
     def grad(self):
@@ -574,3 +582,26 @@ class Tensor:
         self._device = self._tensor.device
         self._dtype = "float32"
         self._shape = tuple(self._tensor.shape)
+        self._shm = None
+
+    def share_memory_(self):
+        if self.is_shared():
+            return self
+        from multiprocessing.shared_memory import SharedMemory
+        import numpy as np
+        import torch_candle_backend as _kernels
+        
+        element_size = np.dtype(self.dtype).itemsize
+        size = self.numel() * element_size
+        
+        shm = SharedMemory(create=True, size=size)
+        self._shm = shm
+        
+        arr = np.ndarray(self.shape, dtype=self.dtype, buffer=shm.buf)
+        arr[:] = self.numpy()[:]
+        
+        self._tensor = _kernels.PyTensor(arr, device=self.device, dtype=self.dtype, requires_grad=self.requires_grad)
+        return self
+
+    def is_shared(self):
+        return self._shm is not None

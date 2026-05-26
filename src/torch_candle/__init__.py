@@ -60,6 +60,33 @@ except ImportError: pass
 try: from . import autograd
 except ImportError: pass
 
+try: from . import multiprocessing
+except ImportError: pass
+
+try: from . import func
+except ImportError: pass
+
+try: from . import jit
+except ImportError: pass
+
+try: from . import c10
+except ImportError: pass
+
+try: from . import aten
+except ImportError: pass
+
+try: from . import caffe2
+except ImportError: pass
+
+try: from . import torchgen
+except ImportError: pass
+
+try: from . import distributed
+except ImportError: pass
+
+try: from . import backends
+except ImportError: pass
+
 # ============================================================
 # Context Managers — torch.no_grad / enable_grad
 # ============================================================

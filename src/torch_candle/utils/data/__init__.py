@@ -4,7 +4,7 @@ import random
 import numpy as np
 
 from .dataset import Dataset, TensorDataset
-from .dataloader import DataLoader
+from .dataloader import DataLoader, get_worker_info
 
 
 class ConcatDataset(Dataset):
@@ -69,6 +69,35 @@ class RandomSampler(Sampler):
             return iter(random.choices(range(n), k=self.num_samples))
         return iter(random.sample(range(n), self.num_samples))
     def __len__(self): return self.num_samples
+
+
+class SubsetRandomSampler(Sampler):
+    def __init__(self, indices, generator=None):
+        self.indices = list(indices)
+    def __iter__(self):
+        shuffled = list(self.indices)
+        random.shuffle(shuffled)
+        return iter(shuffled)
+    def __len__(self):
+        return len(self.indices)
+
+
+class WeightedRandomSampler(Sampler):
+    def __init__(self, weights, num_samples, replacement=True, generator=None):
+        self.weights = list(weights)
+        self.num_samples = num_samples
+        self.replacement = replacement
+    def __iter__(self):
+        indices = list(range(len(self.weights)))
+        total_w = sum(self.weights)
+        normalized_weights = [w / total_w for w in self.weights]
+        if self.replacement:
+            choices = random.choices(indices, weights=normalized_weights, k=self.num_samples)
+        else:
+            choices = np.random.choice(indices, size=self.num_samples, replace=False, p=normalized_weights).tolist()
+        return iter(choices)
+    def __len__(self):
+        return self.num_samples
 
 
 class BatchSampler(Sampler):
