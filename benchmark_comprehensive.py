@@ -48,7 +48,7 @@ np_b = np.random.randn(N, N).astype(np.float32)
 
 print_header("PyTorch vs Torch-Candle Comprehensive Benchmark Suite")
 print(f"  PyTorch CUDA available      : {pt.cuda.is_available()}")
-print(f"  Torch-Candle CUDA available : True (GTX 1650 sm_75 enabled)")
+print(f"  Torch-Candle CUDA available : {tc.cuda.is_available()}")
 
 # =========================================================================
 # 1. CPU BENCHMARK SUITE
@@ -102,33 +102,110 @@ tc_x = tc.randn(1, 1024)
 print_row("nn.Linear (1x1024 -> 4096)", run_timed(lambda: pt_lin(pt_x)), run_timed(lambda: tc_lin(tc_x)))
 print_row("F.dropout (p=0.5)", run_timed(lambda: pt_F.dropout(pt_x, p=0.5, training=True)), run_timed(lambda: tc_F.dropout(tc_x, p=0.5, training=True)))
 
+# --- Advanced Features CPU ---
+print_section("Advanced Features & Architecture Contrast")
+
+pt_t_shm = pt.randn(1024, 1024)
+pt_t_shm.share_memory_()
+tc_t_shm = tc.randn(1024, 1024)
+tc_t_shm.share_memory_()
+
+def pt_ipc_bench():
+    from multiprocessing.reduction import ForkingPickler
+    pickled = ForkingPickler.dumps(pt_t_shm)
+    return ForkingPickler.loads(pickled)
+
+def tc_ipc_bench():
+    from torch_candle.multiprocessing import ForkingPickler
+    pickled = ForkingPickler.dumps(tc_t_shm)
+    return ForkingPickler.loads(pickled)
+
+print_row("IPC Zero-Copy Serialization", run_timed(pt_ipc_bench), run_timed(tc_ipc_bench))
+
+def global_jit_model(x, y):
+    return x * y + 5.0
+
+import tempfile
+def pt_jit_bench():
+    import torch.jit as pt_jit
+    traced = pt_jit.trace(global_jit_model, (pt_lin.weight[0][:10], pt_lin.weight[0][:10]))
+    with tempfile.NamedTemporaryFile(suffix=".pt") as f:
+        pt_jit.save(traced, f.name)
+        loaded = pt_jit.load(f.name)
+        _ = loaded(pt_lin.weight[0][:10], pt_lin.weight[0][:10])
+
+def tc_jit_bench():
+    import torch_candle.jit as tc_jit
+    traced = tc_jit.trace(global_jit_model, (tc_lin.weight[0][:10], tc_lin.weight[0][:10]))
+    with tempfile.NamedTemporaryFile(suffix=".pt") as f:
+        tc_jit.save(traced, f.name)
+        loaded = tc_jit.load(f.name)
+        _ = loaded(tc_lin.weight[0][:10], tc_lin.weight[0][:10])
+
+print_row("JIT Cycle (Trace+Save+Load)", run_timed(pt_jit_bench), run_timed(tc_jit_bench))
+
+
+pt_x_align = pt.randn(512, 512).cuda() if pt.cuda.is_available() else pt.randn(512, 512)
+pt_y_align = pt.randn(512, 512)
+tc_x_align = tc.randn(512, 512).cuda() if tc.cuda.is_available() else tc.randn(512, 512)
+tc_y_align = tc.randn(512, 512)
+
+def pt_mixed_device():
+    return pt_x_align + pt_y_align.to(pt_x_align.device)
+
+def tc_mixed_device():
+    return tc_x_align + tc_y_align
+
+print_row("Mixed Device Addition (Auto vs Man)", run_timed(pt_mixed_device), run_timed(tc_mixed_device))
+
+pt_w_sha = pt.randn(256, 256, requires_grad=True)
+tc_w_sha = tc.randn(256, 256, requires_grad=True)
+
+def pt_sha_bench():
+    pt_w_sha.grad = None
+    loss = (pt_w_sha * 2.0).sum()
+    loss.backward()
+    _ = pt_w_sha.grad
+
+def tc_sha_bench():
+    tc.Tensor.enable_sha = True
+    tc_w_sha._tensor.grad = None
+    loss = (tc_w_sha * 2.0).sum()
+    loss.backward()
+    _ = tc_w_sha.grad
+
+print_row("Autograd Step (SHA overhead)", run_timed(pt_sha_bench), run_timed(tc_sha_bench))
+
 # =========================================================================
 # 2. GPU BENCHMARK SUITE
 # =========================================================================
 print_header("2. GPU BENCHMARK SUITE (PyTorch GPU vs Torch-Candle GPU)")
-if not pt.cuda.is_available():
-    print("  \033[93mNOTE: PyTorch CUDA is not available. Falling back to PyTorch CPU as the baseline.\033[0m")
-    print("  This benchmark compares Torch-Candle GPU/CUDA directly against PyTorch CPU!")
+if tc.cuda.is_available():
+    if not pt.cuda.is_available():
+        print("  \033[93mNOTE: PyTorch CUDA is not available. Falling back to PyTorch CPU as the baseline.\033[0m")
+        print("  This benchmark compares Torch-Candle GPU/CUDA directly against PyTorch CPU!")
 
-# --- Element-wise GPU ---
-print_section("Element-wise Operations [1024x1024]")
-pt_A_gpu = pt_A.cuda() if pt.cuda.is_available() else pt_A
-pt_B_gpu = pt_B.cuda() if pt.cuda.is_available() else pt_B
-tc_A_gpu = tc_A.cuda()
-tc_B_gpu = tc_B.cuda()
+    # --- Element-wise GPU ---
+    print_section("Element-wise Operations [1024x1024]")
+    pt_A_gpu = pt_A.cuda() if pt.cuda.is_available() else pt_A
+    pt_B_gpu = pt_B.cuda() if pt.cuda.is_available() else pt_B
+    tc_A_gpu = tc_A.cuda()
+    tc_B_gpu = tc_B.cuda()
 
-print_row("add", run_timed(lambda: pt_A_gpu + pt_B_gpu), run_timed(lambda: tc_A_gpu + tc_B_gpu))
-print_row("mul", run_timed(lambda: pt_A_gpu * pt_B_gpu), run_timed(lambda: tc_A_gpu * tc_B_gpu))
-print_row("relu", run_timed(lambda: pt_A_gpu.relu()), run_timed(lambda: tc_A_gpu.relu()))
+    print_row("add", run_timed(lambda: pt_A_gpu + pt_B_gpu), run_timed(lambda: tc_A_gpu + tc_B_gpu))
+    print_row("mul", run_timed(lambda: pt_A_gpu * pt_B_gpu), run_timed(lambda: tc_A_gpu * tc_B_gpu))
+    print_row("relu", run_timed(lambda: pt_A_gpu.relu()), run_timed(lambda: tc_A_gpu.relu()))
 
-# --- Matmul GPU ---
-print_section("Linear Algebra [Matmul]")
-pt_M1_gpu = pt_M1.cuda() if pt.cuda.is_available() else pt_M1
-pt_M2_gpu = pt_M2.cuda() if pt.cuda.is_available() else pt_M2
-tc_M1_gpu = tc_M1.cuda()
-tc_M2_gpu = tc_M2.cuda()
+    # --- Matmul GPU ---
+    print_section("Linear Algebra [Matmul]")
+    pt_M1_gpu = pt_M1.cuda() if pt.cuda.is_available() else pt_M1
+    pt_M2_gpu = pt_M2.cuda() if pt.cuda.is_available() else pt_M2
+    tc_M1_gpu = tc_M1.cuda()
+    tc_M2_gpu = tc_M2.cuda()
 
-print_row("matmul (512x512)", run_timed(lambda: pt_M1_gpu @ pt_M2_gpu), run_timed(lambda: tc_M1_gpu @ tc_M2_gpu))
+    print_row("matmul (512x512)", run_timed(lambda: pt_M1_gpu @ pt_M2_gpu), run_timed(lambda: tc_M1_gpu @ tc_M2_gpu))
+else:
+    print("  \033[93mNOTE: Torch-Candle CUDA is not available. Skipping GPU Suite.\033[0m")
 
 # =========================================================================
 # 3. COMBINED PIPELINE BENCHMARK (CPU + GPU Pipeline)
@@ -155,12 +232,15 @@ def pt_combined_pipeline():
 def tc_combined_pipeline():
     a = tc.tensor(np_a, device="cpu")
     b = tc.tensor(np_b, device="cpu")
-    a = a.cuda()
-    b = b.cuda()
+    if tc.cuda.is_available():
+        a = a.cuda()
+        b = b.cuda()
     c = a @ b
-    c = c.cpu()
+    if tc.cuda.is_available():
+        c = c.cpu()
     return c.numpy()
 
 print_section("End-to-End CPU+GPU Combined Pipeline [512x512]")
 print_row("Combined DL Pipeline", run_timed(pt_combined_pipeline), run_timed(tc_combined_pipeline))
 print("=" * 80)
+

@@ -1,54 +1,78 @@
-# PyTorch vs `torch-candle` — Comprehensive Multi-Suite Benchmark Report
 
-> **Environment:** Linux (HP Victus 15) · NVIDIA GTX 1650 (sm_75) · PyTorch `2.10.0+cpu` · `torch-candle` (Release-Optimized, native `target-cpu` vectorization & native CUDA GPU backend)  
-> **Method:** Median of 10 timed runs, 3 warmup runs. All operations on float32.  
-> **Speedup > 1.00x** ⇒ torch-candle is faster · **< 1.00x** ⇒ PyTorch is faster  
+════════════════════════════════════════════════════════════════════════════════
+║            PyTorch vs Torch-Candle Comprehensive Benchmark Suite             ║
+════════════════════════════════════════════════════════════════════════════════
+  PyTorch CUDA available      : False
+  Torch-Candle CUDA available : False
 
----
+════════════════════════════════════════════════════════════════════════════════
+║           1. CPU BENCHMARK SUITE (PyTorch CPU vs Torch-Candle CPU)           ║
+════════════════════════════════════════════════════════════════════════════════
 
-## ║ Scenario 1: CPU Benchmark Suite (PyTorch CPU vs. Torch-Candle CPU)
+────────────────────────────────────────────────────────────────────────────────
+  Element-wise Operations [1024x1024]
+────────────────────────────────────────────────────────────────────────────────
+Operation                           | PyTorch            | Torch-Candle       | Speedup   
+--------------------------------------------------------------------------------
+add                                 |        0.097 ms |       16.942 ms | [91m0.01x     [0m
+mul                                 |        0.052 ms |       16.209 ms | [91m0.00x     [0m
+relu                                |        0.071 ms |       10.720 ms | [91m0.01x     [0m
+sigmoid                             |        0.148 ms |       22.575 ms | [91m0.01x     [0m
+tanh                                |        0.529 ms |       30.467 ms | [91m0.02x     [0m
+exp                                 |        0.158 ms |       13.891 ms | [91m0.01x     [0m
 
-Our newly vectorized native CPU backend (`target-cpu=native` AVX2/FMA) delivers PyTorch-grade speeds across standard operations and beats PyTorch on dense layers and linear algebra!
+────────────────────────────────────────────────────────────────────────────────
+  Linear Algebra [Matmul]
+────────────────────────────────────────────────────────────────────────────────
+Operation                           | PyTorch            | Torch-Candle       | Speedup   
+--------------------------------------------------------------------------------
+matmul (512x512)                    |        0.857 ms |       79.107 ms | [91m0.01x     [0m
 
-| Operation | PyTorch CPU (ms) | Torch-Candle CPU (ms) | Speedup | Status |
-|-----------|:----------------:|:---------------------:|:-------:|:------:|
-| **add**   | 0.101 ms | 0.185 ms | **0.55x** | Competitive |
-| **mul**   | 0.088 ms | 0.187 ms | **0.47x** | Competitive |
-| **relu**  | 0.048 ms | 0.097 ms | **0.50x** | Close |
-| **sigmoid** | 0.210 ms | 2.461 ms | **0.09x** | Vectorized CPU |
-| **tanh**  | 0.752 ms | 15.828 ms | **0.05x** | Vectorized CPU |
-| **exp**   | 0.267 ms | 2.157 ms | **0.12x** | Vectorized CPU |
-| **matmul (512x512)** | 0.788 ms | 0.718 ms | **1.10x** | **torch-candle Wins!** 🏆 |
-| **sum (all)** | 0.035 ms | 0.051 ms | **0.69x** | Close |
-| **mean (all)** | 0.039 ms | 0.047 ms | **0.83x** | **Extremely Close!** |
-| **norm (L2)** | 0.103 ms | 0.154 ms | **0.67x** | Close |
-| **nn.Linear (1x1024 → 4096)** | 0.476 ms | 0.451 ms | **1.06x** | **torch-candle Wins!** 🏆 |
-| **F.dropout (p=0.5)** | 0.018 ms | 0.018 ms | **0.98x** | **Tie / Match!** 🏆 |
+────────────────────────────────────────────────────────────────────────────────
+  Reductions [1024x1024]
+────────────────────────────────────────────────────────────────────────────────
+Operation                           | PyTorch            | Torch-Candle       | Speedup   
+--------------------------------------------------------------------------------
+sum (all)                           |        0.039 ms |        5.982 ms | [91m0.01x     [0m
+mean (all)                          |        0.041 ms |        5.928 ms | [91m0.01x     [0m
+norm (L2)                           |        0.110 ms |       22.403 ms | [91m0.00x     [0m
 
----
+────────────────────────────────────────────────────────────────────────────────
+  Deep Learning Modules & Functional Ops
+────────────────────────────────────────────────────────────────────────────────
+Operation                           | PyTorch            | Torch-Candle       | Speedup   
+--------------------------------------------------------------------------------
+nn.Linear (1x1024 -> 4096)          |        0.469 ms |       62.537 ms | [91m0.01x     [0m
+F.dropout (p=0.5)                   |        0.023 ms |        0.383 ms | [91m0.06x     [0m
 
-## ║ Scenario 2: GPU Benchmark Suite (Torch-Candle GPU vs. PyTorch Baseline)
+────────────────────────────────────────────────────────────────────────────────
+  Advanced Features & Architecture Contrast
+────────────────────────────────────────────────────────────────────────────────
+Operation                           | PyTorch            | Torch-Candle       | Speedup   
+--------------------------------------------------------------------------------
+IPC Zero-Copy Serialization         |        0.289 ms |        0.333 ms | [91m0.87x     [0m
+JIT Cycle (Trace+Save+Load)         |        2.150 ms |        0.686 ms | [92m3.13x     [0m
+Mixed Device Addition (Auto vs Man) |        0.016 ms |        4.260 ms | [91m0.00x     [0m
+Autograd Step (SHA overhead)        |        0.085 ms |        4.454 ms | [91m0.02x     [0m
 
-Since host PyTorch is the CPU-only package, this suite compares our highly optimized native CUDA GPU backend on the GTX 1650 directly against PyTorch CPU to highlight the massive hardware acceleration!
+════════════════════════════════════════════════════════════════════════════════
+║           2. GPU BENCHMARK SUITE (PyTorch GPU vs Torch-Candle GPU)           ║
+════════════════════════════════════════════════════════════════════════════════
+  [93mNOTE: Torch-Candle CUDA is not available. Skipping GPU Suite.[0m
 
-| Operation | PyTorch CPU Baseline (ms) | Torch-Candle CUDA GPU (ms) | Speedup vs. CPU Baseline | Status |
-|-----------|:-------------------------:|:--------------------------:|:------------------------:|:------:|
-| **add**   | 0.100 ms | **0.004 ms** (4 µs) | **25.39x FASTER!** 🚀 | Native CUDA |
-| **mul**   | 0.093 ms | **0.004 ms** (4 µs) | **23.87x FASTER!** 🚀 | Native CUDA |
-| **relu**  | 0.043 ms | **0.004 ms** (4 µs) | **11.95x FASTER!** 🚀 | Native CUDA |
-| **matmul (512x512)** | 0.551 ms | **0.012 ms** (12 µs) | **47.51x FASTER!** 🚀 | cuBLAS Acceleration |
+════════════════════════════════════════════════════════════════════════════════
+║ 3. COMBINED PIPELINE BENCHMARK (CPU -> GPU Transfer -> Math -> CPU -> NumPy) ║
+════════════════════════════════════════════════════════════════════════════════
+  This workflow measures deep learning pipeline memory bandwidth and latency:
+  1. Create CPU tensor from NumPy
+  2. Transfer tensor to GPU (.cuda())
+  3. Run matrix multiplication on GPU
+  4. Transfer output back to CPU (.cpu() / .numpy())
 
----
-
-## ║ Scenario 3: Combined Pipeline (CPU + GPU Memory Crossing)
-
-This workflow measures a realistic deep learning pipeline from start to finish:
-1. Create CPU tensor from NumPy
-2. Transfer tensor to GPU (`.cuda()`)
-3. Execute heavy Matrix Multiplication on GPU
-4. Transfer output back to CPU (`.cpu()`) and convert to a NumPy array.
-
-| Engine / Workflow | Median Execution Time (ms) | Speedup | Analysis |
-|-------------------|:--------------------------:|:-------:|:---------|
-| **PyTorch CPU** (Stay on CPU) | 0.591 ms | *Baseline (1.00x)* | Runs entirely on CPU (no memory copying). |
-| **Torch-Candle CPU+GPU** | **1.421 ms** | **0.42x** | Extremely efficient! Even with two host-to-device memory copies and JIT allocations, the entire pipeline executes in just 1.4 milliseconds. |
+────────────────────────────────────────────────────────────────────────────────
+  End-to-End CPU+GPU Combined Pipeline [512x512]
+────────────────────────────────────────────────────────────────────────────────
+Operation                           | PyTorch            | Torch-Candle       | Speedup   
+--------------------------------------------------------------------------------
+Combined DL Pipeline                |        0.684 ms |       71.856 ms | [91m0.01x     [0m
+================================================================================

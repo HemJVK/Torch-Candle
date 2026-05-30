@@ -1,61 +1,144 @@
-# PyTorch vs `torch-candle` — Comprehensive CPU & GPU Benchmark Report
 
-> **Environment:** Linux (HP Victus 15) · NVIDIA GTX 1650 (sm_75) · PyTorch `2.10.0+cpu` · `torch-candle` (Release-Optimized with `target-cpu=native` Vectorization & CUDA GPU backend)  
-> **Method:** Median of 10 timed runs, 3 warmup runs. All operations on float32.  
-> **Speedup > 1.00x** ⇒ torch-candle is faster · **< 1.00x** ⇒ PyTorch is faster  
+╔══════════════════════════════════════════════════════════════════════╗
+║        PyTorch vs torch-candle  ─  Performance Benchmark            ║
+╚══════════════════════════════════════════════════════════════════════╝
+  PyTorch  version : 2.10.0+cpu
+  Candle   variant : torch_candle (CPU, Rust backend)
+  Warmup runs      : 3   Timed runs: 10
+  Timing metric    : median wall-clock ms
 
----
+  Speedup > 1.00x  ⇒  torch-candle is faster
+  Speedup < 1.00x  ⇒  PyTorch is faster
 
-## 1. Element-wise Operations — `[1024×1024]`
+========================================================================
+  1. Element-wise Operations  [shape: 1024×1024]
+========================================================================
+  Operation                              PyTorch (ms)           Candle (ms)               Speedup
+------------------------------------------------------------------------
+  add                                 0.094      15.737      0.01x
+  mul                                 0.096      15.288      0.01x
+  relu                                0.066       9.959      0.01x
+  sigmoid                             0.134      21.163      0.01x
+  tanh                                0.453      28.654      0.02x
+  exp                                 0.189      14.198      0.01x
+  log                                 2.089      48.727      0.04x
+  sqrt                                1.476      42.738      0.03x
 
-| Operation | PyTorch CPU (ms) | Candle CPU (ms) | Speedup | Status |
-|-----------|:---:|:---:|:---:|:---:|
-| **add**   | 0.097 | 0.154 | **0.63x** | Competitive |
-| **mul**   | 0.079 | 0.148 | **0.53x** | Competitive |
-| **relu**  | 0.036 | 0.089 | **0.41x** | Close |
-| **sigmoid** | 0.132 | 2.441 | **0.05x** | Vectorized CPU |
-| **tanh**  | 0.449 | 15.988 | **0.03x** | Vectorized CPU |
-| **exp**   | 0.150 | 2.116 | **0.07x** | Vectorized CPU |
-| **log**   | 1.629 | 6.547 | **0.25x** | Vectorized CPU |
-| **sqrt**  | 1.646 | 4.621 | **0.36x** | Vectorized CPU |
+========================================================================
+  2. Linear Algebra  [matmul: 512×512 @ 512×512]
+========================================================================
+  Operation                              PyTorch (ms)           Candle (ms)               Speedup
+------------------------------------------------------------------------
+  matmul (512×512)                    0.571      75.705      0.01x
+  matmul (128×128)                    0.019       1.508      0.01x
+  bmm (4×128×128)                     0.073       5.120      0.01x
+  mv (x @ W, 512)                     0.022       4.231      0.01x
 
----
+========================================================================
+  3. Reduction Ops  [shape: 1024×1024]
+========================================================================
+  Operation                              PyTorch (ms)           Candle (ms)               Speedup
+------------------------------------------------------------------------
+  sum (all)                           0.033       5.756      0.01x
+  sum (dim=1)                         0.032       5.912      0.01x
+  mean (all)                          0.044       5.893      0.01x
+  max (all)                           0.034      10.869      0.00x
+  min (all)                           0.032      11.014      0.00x
+  std                                 0.178       3.867      0.05x
+  norm (L2)                           0.102      20.469      0.00x
 
-## 2. Reduction Operations — `[1024×1024]`
+========================================================================
+  4. nn.Functional Ops  [batch=64  seq/C=256  D=512]
+========================================================================
+  Operation                              PyTorch (ms)           Candle (ms)               Speedup
+------------------------------------------------------------------------
+  softmax (dim=1)                     0.005       1.000      0.01x
+  log_softmax (dim=1)                 0.005       1.005      0.01x
+  layer_norm (B×C)                    0.007       1.056      0.01x
+  gelu                                0.010       1.826      0.01x
+  silu                                0.014       0.589      0.02x
+  dropout (p=0.5)                     0.193       3.914      0.05x
 
-Our newly vectorized native CPU compilation has completely closed the reduction gap with PyTorch!
+========================================================================
+  5. nn.Linear Forward Pass
+========================================================================
+  Operation                              PyTorch (ms)           Candle (ms)               Speedup
+------------------------------------------------------------------------
+  Linear 64×512 → 512                 0.107      12.819      0.01x
+  Linear 64×512 → 2048                0.597      53.183      0.01x
+  Linear 1×1024 → 4096                0.730      61.974      0.01x
 
-| Operation | PyTorch CPU (ms) | Candle CPU (ms) | Speedup | Status |
-|-----------|:---:|:---:|:---:|:---:|
-| **sum (all)**  | 0.040 | 0.052 | **0.76x** | **Extremely Close!** |
-| **sum (dim=1)** | 0.037 | 0.050 | **0.73x** | **Extremely Close!** |
-| **mean (all)** | 0.035 | 0.049 | **0.71x** | **Extremely Close!** |
-| **norm (L2)**  | 0.101 | 0.139 | **0.73x** | **Extremely Close!** |
-| **MSELoss**    | 0.076 | 0.114 | **0.66x** | **Extremely Close!** |
+========================================================================
+  6. Conv2d Forward Pass
+========================================================================
+  Operation                              PyTorch (ms)           Candle (ms)               Speedup
+------------------------------------------------------------------------
+  Conv2d 1×1×28×28 k=3 out=8          0.025       0.694      0.04x
+  Conv2d 4×3×224×224 k=3 out=16       3.384     158.850      0.02x
 
----
+========================================================================
+  7. MLP Inference  [64 × (512→512→512→10)]
+========================================================================
+  Operation                              PyTorch (ms)           Candle (ms)               Speedup
+------------------------------------------------------------------------
+  MLP forward (no grad)               0.241      28.340      0.01x
+  MLP forward+backward                0.809      69.549      0.01x
 
-## 3. Deep Learning Modules & Layers
+========================================================================
+  8. Loss Functions  [B=256 C=1000]
+========================================================================
+  Operation                              PyTorch (ms)           Candle (ms)               Speedup
+------------------------------------------------------------------------
+  MSELoss                             0.060       8.980      0.01x
+  CrossEntropyLoss                    0.067      56.446      0.00x
 
-| Config / Layer | PyTorch CPU (ms) | Candle CPU (ms) | Speedup | Status |
-|----------------|:---:|:---:|:---:|:---:|
-| **nn.Linear (1×1024 → 4096)** | 0.498 | 0.452 | **1.10x** | **torch-candle Wins!** 🏆 |
-| **nn.Functional Dropout**     | 0.189 | 0.097 | **1.95x** | **torch-candle Wins!** 🏆 |
-| **Conv2d 4×3×224×224 k=3 out=16** | 3.035 | 7.538 | **0.40x** | Highly Competitive |
-| **MLP forward+backward**      | 0.728 | 1.252 | **0.58x** | Highly Competitive |
+========================================================================
+  9. Tensor Creation  [1024×1024]
+========================================================================
+  Operation                              PyTorch (ms)           Candle (ms)               Speedup
+------------------------------------------------------------------------
+  zeros                               0.035       0.122      0.28x
+  ones                                0.034       3.138      0.01x
+  randn                               3.442     434.566      0.01x
+  arange (0..N*N)                     0.118       0.626      0.19x
 
----
+========================================================================
+  10. Scaled Dot-Product Attention  [B=4 H=8 S=512 D=64]
+========================================================================
+  Operation                              PyTorch (ms)           Candle (ms)               Speedup
+------------------------------------------------------------------------
+  SDPA (no mask)                      4.030     411.272      0.01x
 
-## 4. GPU / CUDA Hardware Acceleration — `[matmul: 1024×1024]`
+========================================================================
+  11. Multiprocessing & Shared Memory (IPC)
+========================================================================
+  Operation                              PyTorch (ms)           Candle (ms)               Speedup
+------------------------------------------------------------------------
+  IPC Tensor pickling loop            0.291       0.433      0.67x
 
-Our re-architected source-compiled CUDA backend lets `torch-candle` run with massive, parallel hardware-accelerated speeds directly on the GTX 1650 GPU!
+========================================================================
+  12. JIT Tracing & Computation
+========================================================================
+  Operation                              PyTorch (ms)           Candle (ms)               Speedup
+------------------------------------------------------------------------
+  JIT Cycle (Trace+Save+Load)         2.005       0.236      8.50x
+  JIT Traced Exec (1024x1024)         0.102      16.914      0.01x
 
-| Engine / Device | Median Execution Time (ms) | Speedup vs. PyTorch CPU |
-|-----------------|:--------------------------:|:-----------------------:|
-| **PyTorch CPU** | 6.544 ms | *Baseline (1.00x)* |
-| **Torch-Candle CPU** | 5.723 ms | **1.14x Faster** |
-| **Torch-Candle CUDA GPU** | **0.010 ms** (10 µs) | **644.75x FASTER!** 🚀 |
+========================================================================
+  13. Auto-Device Alignment
+========================================================================
+  Operation                              PyTorch (ms)           Candle (ms)               Speedup
+------------------------------------------------------------------------
+  Mixed-Device Align & Add            0.100      17.099      0.01x
 
-### CUDA Integration Highlights:
-- **JIT Version Bypassing**: Implemented automatic PTX ISA header patching to translate compiled declarations to `.version 8.0`, allowing NVCC V12.8 output to load flawlessly on NVIDIA Driver 535 (supporting CUDA 12.2 maximum capability).
-- **Zero Memory Bottleneck**: High-speed, zero-copy PyO3 tensor passing between Rust and Python.
+========================================================================
+  14. Self-Healing Autograd Resilience
+========================================================================
+  Operation                              PyTorch (ms)           Candle (ms)               Speedup
+------------------------------------------------------------------------
+  Autograd step (SHA active)          0.101      17.179      0.01x
+
+========================================================================
+  Benchmark complete.
+========================================================================
+

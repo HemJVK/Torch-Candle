@@ -420,6 +420,150 @@ def bench_attention():
         (lambda: _candle_F.scaled_dot_product_attention(cQ, cK, cV)) if _CANDLE_OK else None)
 
 
+# ── 11. Multiprocessing & Shared Memory (IPC) ─────────────────────────────────
+
+def bench_multiprocessing_ipc():
+    hdr("11. Multiprocessing & Shared Memory (IPC)")
+    N = 1024
+    
+    pt_t = None
+    tc_t = None
+    
+    if _PYTORCH_OK:
+        import torch.multiprocessing as pt_mp
+        pt_t = _torch.randn(N, N)
+        pt_t.share_memory_()
+        
+    if _CANDLE_OK:
+        import torch_candle.multiprocessing as tc_mp
+        tc_t = _candle.randn(N, N)
+        tc_t.share_memory_()
+        
+    def pt_ipc():
+        from multiprocessing.reduction import ForkingPickler
+        pickled = ForkingPickler.dumps(pt_t)
+        return ForkingPickler.loads(pickled)
+        
+    def tc_ipc():
+        from torch_candle.multiprocessing import ForkingPickler
+        pickled = ForkingPickler.dumps(tc_t)
+        return ForkingPickler.loads(pickled)
+
+    row("IPC Tensor pickling loop",
+        pt_ipc if _PYTORCH_OK else None,
+        tc_ipc if _CANDLE_OK else None)
+
+
+# ── 12. JIT Tracing & Compilation ─────────────────────────────────────────────
+
+def _bench_model_fn(x, y):
+    return x * y + 5.0
+
+def bench_jit_tracing():
+    hdr("12. JIT Tracing & Computation")
+    
+    pt_x = _torch.randn(10) if _PYTORCH_OK else None
+    pt_y = _torch.randn(10) if _PYTORCH_OK else None
+    
+    tc_x = _candle.randn(10) if _CANDLE_OK else None
+    tc_y = _candle.randn(10) if _CANDLE_OK else None
+    
+    import tempfile
+    
+    def pt_lifecycle():
+        import torch.jit as pt_jit
+        traced = pt_jit.trace(_bench_model_fn, (pt_x, pt_y))
+        with tempfile.NamedTemporaryFile(suffix=".pt") as f:
+            pt_jit.save(traced, f.name)
+            loaded = pt_jit.load(f.name)
+            _ = loaded(pt_x, pt_y)
+
+    def tc_lifecycle():
+        import torch_candle.jit as tc_jit
+        traced = tc_jit.trace(_bench_model_fn, (tc_x, tc_y))
+        with tempfile.NamedTemporaryFile(suffix=".pt") as f:
+            tc_jit.save(traced, f.name)
+            loaded = tc_jit.load(f.name)
+            _ = loaded(tc_x, tc_y)
+
+    row("JIT Cycle (Trace+Save+Load)",
+        pt_lifecycle if _PYTORCH_OK else None,
+        tc_lifecycle if _CANDLE_OK else None)
+        
+    pt_a = _torch.randn(1024, 1024) if _PYTORCH_OK else None
+    pt_b = _torch.randn(1024, 1024) if _PYTORCH_OK else None
+    tc_a = _candle.randn(1024, 1024) if _CANDLE_OK else None
+    tc_b = _candle.randn(1024, 1024) if _CANDLE_OK else None
+    
+    pt_traced = _torch.jit.trace(lambda x, y: x * y, (pt_a, pt_b)) if _PYTORCH_OK else None
+    tc_traced = _candle.jit.trace(lambda x, y: x * y, (tc_a, tc_b)) if _CANDLE_OK else None
+    
+    row("JIT Traced Exec (1024x1024)",
+        (lambda: pt_traced(pt_a, pt_b)) if _PYTORCH_OK else None,
+        (lambda: tc_traced(tc_a, tc_b)) if _CANDLE_OK else None)
+
+
+# ── 13. Auto-Device Alignment (Stress Test) ──────────────────────────────────
+
+def bench_device_alignment():
+    hdr("13. Auto-Device Alignment")
+    N = 1024
+    
+    pt_x_gpu = _torch.randn(N, N) if _PYTORCH_OK else None
+    pt_y_cpu = _torch.randn(N, N) if _PYTORCH_OK else None
+    
+    tc_x_gpu = _candle.randn(N, N) if _CANDLE_OK else None
+    tc_y_cpu = _candle.randn(N, N) if _CANDLE_OK else None
+    
+    target_device = "cuda" if (_torch.cuda.is_available() if _PYTORCH_OK else False) else "cpu"
+    if pt_x_gpu is not None:
+        pt_x_gpu = pt_x_gpu.to(target_device)
+    
+    tc_target_device = "cuda" if (_candle.cuda.is_available() if _CANDLE_OK else False) else "cpu"
+    if tc_x_gpu is not None:
+        try:
+            tc_x_gpu = tc_x_gpu.to(tc_target_device)
+        except Exception:
+            tc_x_gpu = tc_x_gpu.cpu()
+            
+    def pt_manual_align():
+        return pt_x_gpu + pt_y_cpu.to(target_device)
+        
+    def tc_auto_align():
+        return tc_x_gpu + tc_y_cpu
+
+    row("Mixed-Device Align & Add",
+        pt_manual_align if _PYTORCH_OK else None,
+        tc_auto_align if _CANDLE_OK else None)
+
+
+# ── 14. Self-Healing Autograd (SHA) Resilience ───────────────────────────────
+
+def bench_self_healing():
+    hdr("14. Self-Healing Autograd Resilience")
+    N = 512
+    
+    pt_w = _torch.randn(N, N, requires_grad=True) if _PYTORCH_OK else None
+    tc_w = _candle.randn(N, N, requires_grad=True) if _CANDLE_OK else None
+    
+    def pt_step():
+        pt_w.grad = None
+        loss = (pt_w * 2.0).sum()
+        loss.backward()
+        _ = pt_w.grad
+        
+    def tc_step_sha():
+        _candle.Tensor.enable_sha = True
+        tc_w._tensor.grad = None
+        loss = (tc_w * 2.0).sum()
+        loss.backward()
+        _ = tc_w.grad
+
+    row("Autograd step (SHA active)",
+        pt_step if _PYTORCH_OK else None,
+        tc_step_sha if _CANDLE_OK else None)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -435,7 +579,7 @@ def main():
     print()
     print("  Speedup > 1.00x  ⇒  torch-candle is faster")
     print("  Speedup < 1.00x  ⇒  PyTorch is faster")
-
+ 
     bench_elementwise()
     bench_linalg()
     bench_reductions()
@@ -446,6 +590,10 @@ def main():
     bench_losses()
     bench_creation()
     bench_attention()
+    bench_multiprocessing_ipc()
+    bench_jit_tracing()
+    bench_device_alignment()
+    bench_self_healing()
 
     print()
     print("=" * WIDTH)
@@ -456,3 +604,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
