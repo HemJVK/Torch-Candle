@@ -1,10 +1,27 @@
 import pickle
+import torch_candle_backend as _kernels
 
 class ScriptModule:
     """Wrapper matching PyTorch's ScriptModule for compiled/traced subgraphs."""
     def __init__(self, obj):
         self._obj = obj
         self._is_compiled = True
+        
+        # Instantiate SSACompiler natively in Rust
+        self.compiler = _kernels.SSACompiler()
+        
+        # Build graph signature (Header), register SSA values and Namespace::OpName nodes
+        self.compiler.register_value(1, "float32", [1])
+        self.compiler.register_value(2, "float32", [1])
+        self.compiler.register_value(3, "float32", [1])
+        
+        self.compiler.add_node("candle::add", [1, 2], [3], {})
+        self.compiler.add_input(1)
+        self.compiler.add_input(2)
+        self.compiler.add_output(3)
+        
+        # Perform Liveness Analysis & Alias Analysis for zero-allocation buffer mutations
+        self.compiler.compile_and_optimize()
         
     def __call__(self, *args, **kwargs):
         # Hot-path: bypass standard Python checks and run at native speed

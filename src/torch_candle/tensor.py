@@ -17,6 +17,7 @@ class Tensor:
     __slots__ = ['_tensor', '_device', '_dtype', '_shape', '_id', '_shm']
 
     _grad_enabled = True  # toggled by torch.no_grad()
+    enable_sha = True
 
     def __hash__(self):
         return id(self._tensor)
@@ -126,49 +127,10 @@ class Tensor:
 
     @property
     def grad(self):
-        g = self._tensor.grad
+        g = self._tensor.retrieve_grad(id(self))
         if g is None:
             return None
-        
-        res_grad = self._fast_wrap(g, dtype=self.dtype)
-        
-        # Self-Healing Autograd Engine (SHA)
-        if self.requires_grad and getattr(Tensor, "enable_sha", True):
-            grad_np = res_grad.numpy()
-            anomalies = np.isnan(grad_np) | np.isinf(grad_np)
-            if np.any(anomalies):
-                # Anomaly detected! Print an academic warning and reconstruct!
-                print(f"⚠️ [Self-Healing Autograd] Recovered anomalous gradient (NaN/Inf) on parameter {id(self)}!")
-                
-                if not hasattr(Tensor, "_grad_history"):
-                    Tensor._grad_history = {}
-                    
-                param_id = id(self)
-                if param_id in Tensor._grad_history and Tensor._grad_history[param_id][0] == grad_np.shape:
-                    # Reconstruct from parameter-specific valid EMA history of identical shape
-                    history = Tensor._grad_history[param_id][1]
-                    grad_np[anomalies] = history[anomalies]
-                else:
-                    # Fallback to zero if no history is recorded yet to prevent training crash
-                    grad_np[anomalies] = 0.0
-                    
-                # Overwrite computed gradient with the reconstructed healthy estimate
-                healed_grad = Tensor(grad_np, device=self.device, dtype=self.dtype)
-                self._tensor.grad = healed_grad._tensor
-                res_grad = healed_grad
-            else:
-                # Update exponential moving average history of valid gradients
-                if not hasattr(Tensor, "_grad_history"):
-                    Tensor._grad_history = {}
-                param_id = id(self)
-                ema_factor = 0.9
-                if param_id in Tensor._grad_history and Tensor._grad_history[param_id][0] == grad_np.shape:
-                    prev_grad = Tensor._grad_history[param_id][1]
-                    Tensor._grad_history[param_id] = (grad_np.shape, ema_factor * prev_grad + (1.0 - ema_factor) * grad_np)
-                else:
-                    Tensor._grad_history[param_id] = (grad_np.shape, grad_np.copy())
-                    
-        return res_grad
+        return self._fast_wrap(g, dtype=self.dtype)
 
     @grad.setter
     def grad(self, value):

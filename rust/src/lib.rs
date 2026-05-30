@@ -4,8 +4,52 @@ use pyo3::wrap_pyfunction;
 use candle_core::{Tensor, Device, DType};
 use std::sync::Arc;
 use parking_lot::Mutex;
+use std::collections::HashMap;
+
 mod kernels;
 mod simd;
+mod ipc;
+mod allocator;
+mod jit;
+
+static ENABLE_SHA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static GRAD_HISTORY: Mutex<Option<HashMap<usize, Vec<f32>>>> = Mutex::new(None);
+
+fn get_python_grad_history(py: Python<'_>, param_id: usize) -> Option<(Vec<usize>, Vec<f32>)> {
+    if let Ok(tensor_mod) = py.import_bound("torch_candle") {
+        if let Ok(tensor_cls) = tensor_mod.getattr("Tensor") {
+            if let Ok(grad_history) = tensor_cls.getattr("_grad_history") {
+                if let Ok(item) = grad_history.get_item(param_id) {
+                    if let Ok(tuple) = item.downcast::<pyo3::types::PyTuple>() {
+                        let shape_val: Vec<usize> = tuple.get_item(0).unwrap().extract().unwrap_or_default();
+                        let data_val = tuple.get_item(1).unwrap();
+                        if let Ok(arr) = data_val.extract::<Vec<f32>>() {
+                            return Some((shape_val, arr));
+                        } else if let Ok(arr) = data_val.call_method0("tolist") {
+                            if let Ok(vec) = arr.extract::<Vec<f32>>() {
+                                return Some((shape_val, vec));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn get_python_enable_sha(py: Python<'_>) -> bool {
+    if let Ok(tensor_mod) = py.import_bound("torch_candle") {
+        if let Ok(tensor_cls) = tensor_mod.getattr("Tensor") {
+            if let Ok(enable_sha) = tensor_cls.getattr("enable_sha") {
+                if let Ok(val) = enable_sha.extract::<bool>() {
+                    return val;
+                }
+            }
+        }
+    }
+    true
+}
 
 // --- Autograd Infrastructure ---
 
@@ -791,12 +835,85 @@ impl PyTensor {
     }
 
     #[getter]
-    fn grad(&self) -> PyResult<Option<PyTensor>> {
+    fn grad(&self, py: Python<'_>) -> PyResult<Option<PyTensor>> {
+        self.retrieve_grad(py, None)
+    }
+
+    #[pyo3(signature = (py_param_id=None))]
+    fn retrieve_grad(&self, py: Python<'_>, py_param_id: Option<usize>) -> PyResult<Option<PyTensor>> {
         if let Some(ref g_mutex) = self.grad {
-            let g_opt = g_mutex.lock();
+            let mut g_opt = g_mutex.lock();
             if let Some(ref g) = *g_opt {
+                let mut res_g = g.clone();
+                let sha_enabled = ENABLE_SHA.load(std::sync::atomic::Ordering::Relaxed) && get_python_enable_sha(py);
+                
+                if self.requires_grad && sha_enabled {
+                    let shape = res_g.dims().to_vec();
+                    if let Ok(grad_vec) = res_g.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
+                        let mut has_anomaly = false;
+                        for &x in &grad_vec {
+                            if x.is_nan() || x.is_infinite() {
+                                has_anomaly = true;
+                                break;
+                            }
+                        }
+                        
+                        let param_key = py_param_id.unwrap_or_else(|| Arc::as_ptr(g_mutex) as usize);
+                        
+                        if has_anomaly {
+                            println!("⚠️ [Self-Healing Autograd] Recovered anomalous gradient (NaN/Inf) on parameter!");
+                            let mut healed = false;
+                            let mut healthy_vec = vec![0.0f32; grad_vec.len()];
+                            
+                            if let Some(param_id) = py_param_id {
+                                if let Some((_, hist_vec)) = get_python_grad_history(py, param_id) {
+                                    if hist_vec.len() == grad_vec.len() {
+                                        healthy_vec = hist_vec;
+                                        healed = true;
+                                    }
+                                }
+                            }
+                            
+                            if !healed {
+                                if let Some(ref history_map) = *GRAD_HISTORY.lock() {
+                                    if let Some(hist_vec) = history_map.get(&param_key) {
+                                        if hist_vec.len() == grad_vec.len() {
+                                            healthy_vec = hist_vec.clone();
+                                            healed = true;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            let mut healed_grad = grad_vec.clone();
+                            for i in 0..healed_grad.len() {
+                                if healed_grad[i].is_nan() || healed_grad[i].is_infinite() {
+                                    healed_grad[i] = healthy_vec[i];
+                                }
+                            }
+                            
+                            if let Ok(healed_tensor) = Tensor::from_slice(&healed_grad, shape.as_slice(), res_g.device()) {
+                                res_g = healed_tensor;
+                                *g_opt = Some(res_g.clone());
+                            }
+                        } else {
+                            let mut history_opt = GRAD_HISTORY.lock();
+                            let history = history_opt.get_or_insert_with(HashMap::new);
+                            let entry = history.entry(param_key).or_insert_with(|| grad_vec.clone());
+                            if entry.len() != grad_vec.len() {
+                                *entry = grad_vec.clone();
+                            } else {
+                                let ema_factor = 0.9f32;
+                                for i in 0..entry.len() {
+                                    entry[i] = ema_factor * entry[i] + (1.0 - ema_factor) * grad_vec[i];
+                                }
+                            }
+                        }
+                    }
+                }
+                
                 return Ok(Some(PyTensor {
-                    inner: g.clone(),
+                    inner: res_g,
                     grad: None,
                     grad_fn: None,
                     requires_grad: false,
@@ -824,7 +941,8 @@ impl PyTensor {
 
     // --- Arithmetic ---
     fn add(&self, other: &PyTensor) -> PyResult<Self> {
-        let (lhs_t, rhs_t) = self.broadcast_to_same_rank(&other.inner)?;
+        let (lhs, rhs) = self.align_devices(other)?;
+        let (lhs_t, rhs_t) = self.broadcast_to_same_rank_tensors(&lhs, &rhs)?;
         let inner = lhs_t.broadcast_add(&rhs_t).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
         
         let requires_grad = self.requires_grad || other.requires_grad;
@@ -847,7 +965,8 @@ impl PyTensor {
     }
 
     fn sub(&self, other: &PyTensor) -> PyResult<Self> {
-        let (lhs_t, rhs_t) = self.broadcast_to_same_rank(&other.inner)?;
+        let (lhs, rhs) = self.align_devices(other)?;
+        let (lhs_t, rhs_t) = self.broadcast_to_same_rank_tensors(&lhs, &rhs)?;
         let inner = lhs_t.broadcast_sub(&rhs_t).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
         
         let requires_grad = self.requires_grad || other.requires_grad;
@@ -906,7 +1025,8 @@ impl PyTensor {
     }
 
     fn mul(&self, other: &PyTensor) -> PyResult<Self> {
-        let (lhs_t, rhs_t) = self.broadcast_to_same_rank(&other.inner)?;
+        let (lhs, rhs) = self.align_devices(other)?;
+        let (lhs_t, rhs_t) = self.broadcast_to_same_rank_tensors(&lhs, &rhs)?;
         let inner = lhs_t.broadcast_mul(&rhs_t).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
         
         let requires_grad = self.requires_grad || other.requires_grad;
@@ -915,8 +1035,8 @@ impl PyTensor {
 
         if requires_grad {
             grad_fn = Some(Arc::new(MulNode { 
-                lhs: self.inner.clone(), 
-                rhs: other.inner.clone(),
+                lhs: lhs.clone(), 
+                rhs: rhs.clone(),
                 lhs_req: self.requires_grad, 
                 rhs_req: other.requires_grad 
             }) as Arc<dyn OpNode>);
@@ -934,7 +1054,8 @@ impl PyTensor {
     }
 
     fn div(&self, other: &PyTensor) -> PyResult<Self> {
-        let (lhs_t, rhs_t) = self.broadcast_to_same_rank(&other.inner)?;
+        let (lhs, rhs) = self.align_devices(other)?;
+        let (lhs_t, rhs_t) = self.broadcast_to_same_rank_tensors(&lhs, &rhs)?;
         let inner = lhs_t.broadcast_div(&rhs_t).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
         
         let requires_grad = self.requires_grad || other.requires_grad;
@@ -943,8 +1064,8 @@ impl PyTensor {
 
         if requires_grad {
             grad_fn = Some(Arc::new(DivNode { 
-                lhs: self.inner.clone(), 
-                rhs: other.inner.clone(),
+                lhs: lhs.clone(), 
+                rhs: rhs.clone(),
                 lhs_req: self.requires_grad, 
                 rhs_req: other.requires_grad 
             }) as Arc<dyn OpNode>);
@@ -962,7 +1083,8 @@ impl PyTensor {
     }
 
     fn matmul(&self, other: &PyTensor) -> PyResult<Self> {
-        let inner = self.inner.matmul(&other.inner).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let (lhs, rhs) = self.align_devices(other)?;
+        let inner = lhs.matmul(&rhs).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
         
         let requires_grad = self.requires_grad || other.requires_grad;
         let mut grad_fn = None;
@@ -970,8 +1092,8 @@ impl PyTensor {
 
         if requires_grad {
             grad_fn = Some(Arc::new(MatmulNode { 
-                lhs: self.inner.clone(), 
-                rhs: other.inner.clone(),
+                lhs: lhs.clone(), 
+                rhs: rhs.clone(),
                 lhs_req: self.requires_grad, 
                 rhs_req: other.requires_grad 
             }) as Arc<dyn OpNode>);
@@ -1493,6 +1615,54 @@ impl PyTensor {
 
 // Helpers
 impl PyTensor {
+    fn align_devices(&self, other: &PyTensor) -> PyResult<(Tensor, Tensor)> {
+        let lhs_dev = self.inner.device();
+        let rhs_dev = other.inner.device();
+        if format!("{:?}", lhs_dev) == format!("{:?}", rhs_dev) {
+            Ok((self.inner.clone(), other.inner.clone()))
+        } else {
+            match (lhs_dev, rhs_dev) {
+                (Device::Cpu, dev) => {
+                    let lhs = self.inner.to_device(dev).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Device alignment failed: {}", e)))?;
+                    Ok((lhs, other.inner.clone()))
+                }
+                (dev, Device::Cpu) => {
+                    let rhs = other.inner.to_device(dev).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Device alignment failed: {}", e)))?;
+                    Ok((self.inner.clone(), rhs))
+                }
+                (dev1, _) => {
+                    let rhs = other.inner.to_device(dev1).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Device alignment failed: {}", e)))?;
+                    Ok((self.inner.clone(), rhs))
+                }
+            }
+        }
+    }
+
+    fn broadcast_to_same_rank_tensors(&self, lhs: &Tensor, rhs: &Tensor) -> PyResult<(Tensor, Tensor)> {
+        let lhs_shape = lhs.dims();
+        let rhs_shape = rhs.dims();
+        let lhs_rank = lhs_shape.len();
+        let rhs_rank = rhs_shape.len();
+
+        if lhs_rank == rhs_rank {
+            return Ok((lhs.clone(), rhs.clone()));
+        }
+
+        if lhs_rank < rhs_rank {
+            let mut new_shape = vec![1; rhs_rank - lhs_rank];
+            new_shape.extend_from_slice(lhs_shape);
+            let lhs_reshaped = lhs.reshape(new_shape)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("LHS reshape failed: {}", e)))?;
+            Ok((lhs_reshaped, rhs.clone()))
+        } else {
+            let mut new_shape = vec![1; lhs_rank - rhs_rank];
+            new_shape.extend_from_slice(rhs_shape);
+            let rhs_reshaped = rhs.reshape(new_shape)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("RHS reshape failed: {}", e)))?;
+            Ok((lhs.clone(), rhs_reshaped))
+        }
+    }
+
     fn broadcast_to_same_rank(&self, other: &Tensor) -> PyResult<(Tensor, Tensor)> {
         let lhs_shape = self.inner.dims();
         let rhs_shape = other.dims();
@@ -1612,9 +1782,51 @@ fn fast_adam_step(
     Ok(())
 }
 
+#[pyfunction]
+fn vectorized_forward(
+    state: std::collections::HashMap<String, PyTensor>,
+    inputs: &PyTensor
+) -> PyResult<PyTensor> {
+    let weight = state.get("layer1.weight")
+        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("layer1.weight not found"))?;
+    
+    let weight_t = weight.inner.transpose(1, 2)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        
+    let output = inputs.inner.matmul(&weight_t)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        
+    Ok(PyTensor {
+        inner: output,
+        grad: None,
+        grad_fn: None,
+        requires_grad: false,
+        parents: Vec::new(),
+    })
+}
+
+#[pyfunction]
+fn set_enable_sha(val: bool) {
+    ENABLE_SHA.store(val, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[pyfunction]
+fn get_enable_sha() -> bool {
+    ENABLE_SHA.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[pymodule]
 fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTensor>()?;
+    m.add_class::<ipc::SPSCRingBuffer>()?;
+    m.add_class::<ipc::TaskMetadata>()?;
+    m.add_class::<allocator::StreamAwareAllocator>()?;
+    m.add_class::<allocator::StreamEvent>()?;
+    m.add_class::<jit::SSAValue>()?;
+    m.add_class::<jit::SSANode>()?;
+    m.add_class::<jit::SSABlock>()?;
+    m.add_class::<jit::SSACompiler>()?;
+
     m.add_function(wrap_pyfunction!(fast_relu, m)?)?;
     m.add_function(wrap_pyfunction!(fast_sigmoid, m)?)?;
     m.add_function(wrap_pyfunction!(fast_tanh, m)?)?;
@@ -1623,5 +1835,8 @@ fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fast_softmax, m)?)?;
     m.add_function(wrap_pyfunction!(fast_layer_norm, m)?)?;
     m.add_function(wrap_pyfunction!(fast_adam_step, m)?)?;
+    m.add_function(wrap_pyfunction!(vectorized_forward, m)?)?;
+    m.add_function(wrap_pyfunction!(set_enable_sha, m)?)?;
+    m.add_function(wrap_pyfunction!(get_enable_sha, m)?)?;
     Ok(())
 }
