@@ -95,3 +95,15 @@ class no_grad(set_grad_enabled):
 class enable_grad(set_grad_enabled):
     def __init__(self):
         super().__init__(True)
+
+class standard_mode:
+    """Context manager to run standard autograd without self-healing reconstruction."""
+    def __init__(self):
+        self.prev = True
+    def __enter__(self):
+        self.prev = getattr(Tensor, "enable_sha", True)
+        Tensor.enable_sha = False
+        return self
+    def __exit__(self, *args):
+        Tensor.enable_sha = self.prev
+
