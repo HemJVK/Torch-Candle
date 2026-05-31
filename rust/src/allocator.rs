@@ -36,12 +36,16 @@ pub struct AllocationBlock {
     pub recorded_streams: Vec<u32>,
 }
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 #[pyclass]
 pub struct StreamAwareAllocator {
     blocks: Mutex<HashMap<usize, AllocationBlock>>,
     event_queue: Mutex<VecDeque<StreamEvent>>,
     next_ptr: Mutex<usize>,
     next_event_id: Mutex<u32>,
+    pub stream_head: AtomicUsize,
+    pub stream_tail: AtomicUsize,
 }
 
 #[pymethods]
@@ -53,6 +57,8 @@ impl StreamAwareAllocator {
             event_queue: Mutex::new(VecDeque::new()),
             next_ptr: Mutex::new(1000000),
             next_event_id: Mutex::new(1),
+            stream_head: AtomicUsize::new(0),
+            stream_tail: AtomicUsize::new(0),
         }
     }
 
@@ -157,6 +163,39 @@ impl StreamAwareAllocator {
     pub fn wait_event(&self, _comm_stream_id: u32, event: StreamEvent) -> PyResult<()> {
         while !event.query() {
             std::thread::yield_now();
+        }
+        Ok(())
+    }
+
+    pub fn increment_stream_head(&self) -> PyResult<()> {
+        self.stream_head.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn get_stream_head(&self) -> PyResult<usize> {
+        Ok(self.stream_head.load(Ordering::Acquire))
+    }
+
+    pub fn increment_stream_tail(&self) -> PyResult<()> {
+        self.stream_tail.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn wait_for_stream_completion(&self, target: usize) -> PyResult<()> {
+        let start = std::time::Instant::now();
+        loop {
+            let current = self.stream_head.load(Ordering::Acquire);
+            if current >= target {
+                break;
+            }
+            let elapsed = start.elapsed();
+            if elapsed.as_micros() < 50 {
+                // 1. Busy spin (< 50µs)
+                std::hint::spin_loop();
+            } else {
+                // 2. Yield execution to stay warm (> 50µs)
+                std::thread::yield_now();
+            }
         }
         Ok(())
     }

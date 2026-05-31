@@ -73,6 +73,7 @@ except ImportError:
 try:
     from .ast_parser import RustASTParser
     from .ctypes_mmap import CtypesMmapOptimizer
+    from torch_candle_backend import NativeASTParser, VmapDispatcher
 except ImportError:
     pass
 

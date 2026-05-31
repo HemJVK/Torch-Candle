@@ -63,6 +63,30 @@ impl SSACompiler {
         }
     }
 
+    pub fn serialize_to_buffer(&self, ring_buffer: &crate::ipc::SPSCRingBuffer) -> PyResult<()> {
+        for node in &self.block.nodes {
+            let mut payload = [0u8; 256];
+            payload[0] = node.inputs.len() as u8;
+            payload[1] = node.outputs.len() as u8;
+            for (i, &inp) in node.inputs.iter().enumerate().take(10) {
+                payload[2 + i] = inp as u8;
+            }
+            for (i, &out) in node.outputs.iter().enumerate().take(10) {
+                payload[12 + i] = out as u8;
+            }
+            // Byte 22 tracks dynamic operations: 1 for binop, 2 for other
+            if node.op_name == "binop" {
+                payload[22] = 1;
+            } else {
+                payload[22] = 2;
+            }
+            
+            // Push directly into shared memory segment bypassing python runtime checks!
+            ring_buffer.push(777, 0, payload.to_vec())?;
+        }
+        Ok(())
+    }
+
     pub fn register_value(&mut self, id: usize, dtype: String, shape: Vec<usize>) {
         self.value_registry.insert(id, SSAValue {
             id,
@@ -298,4 +322,173 @@ pub fn compile_ast(py: Python<'_>, func: PyObject) -> PyResult<SSACompiler> {
     
     compiler.compile_and_optimize()?;
     Ok(compiler)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Token {
+    Identifier(String),
+    Number(f64),
+    Operator(char),
+    LParen,
+    RParen,
+}
+
+fn tokenize(expr: &str) -> Vec<Token> {
+    let mut tokens = Vec::new();
+    let mut chars = expr.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() {
+            chars.next();
+        } else if c.is_alphabetic() || c == '_' {
+            let mut name = String::new();
+            while let Some(&next_c) = chars.peek() {
+                if next_c.is_alphanumeric() || next_c == '_' {
+                    name.push(chars.next().unwrap());
+                } else {
+                    break;
+                }
+            }
+            tokens.push(Token::Identifier(name));
+        } else if c.is_digit(10) || c == '.' {
+            let mut num_str = String::new();
+            while let Some(&next_c) = chars.peek() {
+                if next_c.is_digit(10) || next_c == '.' {
+                    num_str.push(chars.next().unwrap());
+                } else {
+                    break;
+                }
+            }
+            if let Ok(val) = num_str.parse::<f64>() {
+                tokens.push(Token::Number(val));
+            }
+        } else if c == '+' || c == '-' || c == '*' || c == '/' {
+            tokens.push(Token::Operator(chars.next().unwrap()));
+        } else if c == '(' {
+            tokens.push(Token::LParen);
+            chars.next();
+        } else if c == ')' {
+            tokens.push(Token::RParen);
+            chars.next();
+        } else {
+            chars.next(); // skip unknown character
+        }
+    }
+    tokens
+}
+
+fn precedence(op: char) -> i32 {
+    match op {
+        '+' | '-' => 1,
+        '*' | '/' => 2,
+        _ => 0,
+    }
+}
+
+pub fn parse_to_ssa(expr: &str, mut compiler: SSACompiler) -> PyResult<SSACompiler> {
+    let tokens = tokenize(expr);
+    let mut output_queue: Vec<Token> = Vec::new();
+    let mut operator_stack: Vec<Token> = Vec::new();
+    
+    for token in tokens {
+        match token {
+            Token::Number(_) | Token::Identifier(_) => {
+                output_queue.push(token);
+            }
+            Token::Operator(op) => {
+                while let Some(Token::Operator(top_op)) = operator_stack.last() {
+                    if precedence(*top_op) >= precedence(op) {
+                        output_queue.push(operator_stack.pop().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                operator_stack.push(Token::Operator(op));
+            }
+            Token::LParen => {
+                operator_stack.push(Token::LParen);
+            }
+            Token::RParen => {
+                let mut found = false;
+                while let Some(top) = operator_stack.pop() {
+                    if top == Token::LParen {
+                        found = true;
+                        break;
+                    }
+                    output_queue.push(top);
+                }
+                if !found {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Mismatched parentheses"));
+                }
+            }
+        }
+    }
+    while let Some(op) = operator_stack.pop() {
+        if op == Token::LParen {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Mismatched parentheses"));
+        }
+        output_queue.push(op);
+    }
+    
+    let mut val_stack: Vec<usize> = Vec::new();
+    let mut next_val_id = 1;
+    let mut var_map: HashMap<String, usize> = HashMap::new();
+    
+    for token in output_queue {
+        match token {
+            Token::Number(val) => {
+                let id = next_val_id;
+                next_val_id += 1;
+                compiler.register_value(id, "float32".to_string(), vec![1]);
+                let mut attrs = HashMap::new();
+                attrs.insert("value".to_string(), val.to_string());
+                compiler.add_node("constant".to_string(), vec![], vec![id], attrs);
+                val_stack.push(id);
+            }
+            Token::Identifier(name) => {
+                let id = *var_map.entry(name.clone()).or_insert_with(|| {
+                    let id = next_val_id;
+                    next_val_id += 1;
+                    compiler.register_value(id, "float32".to_string(), vec![1]);
+                    compiler.add_input(id);
+                    id
+                });
+                val_stack.push(id);
+            }
+            Token::Operator(op) => {
+                if val_stack.len() < 2 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid expression format"));
+                }
+                let right_id = val_stack.pop().unwrap();
+                let left_id = val_stack.pop().unwrap();
+                let out_id = next_val_id;
+                next_val_id += 1;
+                compiler.register_value(out_id, "float32".to_string(), vec![1]);
+                
+                let mut attrs = HashMap::new();
+                attrs.insert("op".to_string(), op.to_string());
+                compiler.add_node("binop".to_string(), vec![left_id, right_id], vec![out_id], attrs);
+                val_stack.push(out_id);
+            }
+            _ => {}
+        }
+    }
+    
+    if let Some(final_out) = val_stack.pop() {
+        compiler.add_output(final_out);
+    }
+    
+    compiler.compile_and_optimize()?;
+    Ok(compiler)
+}
+
+#[pyclass]
+pub struct NativeASTParser;
+
+#[pymethods]
+impl NativeASTParser {
+    #[staticmethod]
+    pub fn parse_expression(expr: String) -> PyResult<SSACompiler> {
+        let compiler = SSACompiler::new();
+        parse_to_ssa(&expr, compiler)
+    }
 }

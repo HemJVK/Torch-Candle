@@ -1,4 +1,5 @@
 import torch_candle_backend as _kernels
+from torch_candle_backend import VmapDispatcher
 
 def get_active_dispatch_level() -> int:
     """Retrieve the current level of the nested dynamic dispatcher stack."""
