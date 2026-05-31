@@ -1,25 +1,16 @@
-import numpy as np
-import threading
-
-_dispatch_state = threading.local()
+import torch_candle_backend as _kernels
 
 def get_active_dispatch_level() -> int:
     """Retrieve the current level of the nested dynamic dispatcher stack."""
-    if not hasattr(_dispatch_state, "active_levels"):
-        _dispatch_state.active_levels = []
-    return len(_dispatch_state.active_levels)
+    return _kernels.get_active_dispatch_level()
 
 def push_dispatch_level(level_id: str):
     """Push a new transformation level onto the dynamic dispatcher stack."""
-    if not hasattr(_dispatch_state, "active_levels"):
-        _dispatch_state.active_levels = []
-    _dispatch_state.active_levels.append(level_id)
+    _kernels.push_dispatch_level(level_id)
 
 def pop_dispatch_level() -> str:
     """Pop the top transformation level from the dynamic dispatcher stack."""
-    if not hasattr(_dispatch_state, "active_levels") or not _dispatch_state.active_levels:
-        return None
-    return _dispatch_state.active_levels.pop()
+    return _kernels.pop_dispatch_level()
 
 def rearrange(tensor, pattern, **axes_lengths):
     """

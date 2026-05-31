@@ -170,3 +170,132 @@ impl SSACompiler {
         Ok(())
     }
 }
+
+#[pyfunction]
+pub fn compile_ast(py: Python<'_>, func: PyObject) -> PyResult<SSACompiler> {
+    let inspect = py.import_bound("inspect")?;
+    let ast = py.import_bound("ast")?;
+    let textwrap = py.import_bound("textwrap")?;
+    
+    let source_py = inspect.call_method1("getsource", (func,))?;
+    let source: String = source_py.extract()?;
+    
+    let dedented_py = textwrap.call_method1("dedent", (source,))?;
+    let dedented_source: String = dedented_py.extract()?;
+    
+    let parsed = ast.call_method1("parse", (dedented_source,))?;
+    
+    let mut compiler = SSACompiler::new();
+    
+    let body = parsed.getattr("body")?;
+    let body_list = body.downcast::<pyo3::types::PyList>()?;
+    
+    let mut next_val_id = 1;
+    let mut var_map: HashMap<String, usize> = HashMap::new();
+    
+    for stmt in body_list.iter() {
+        let class_name = stmt.getattr("__class__")?.getattr("__name__")?.extract::<String>()?;
+        if class_name == "FunctionDef" {
+            let func_body_val = stmt.getattr("body")?;
+            let func_body = func_body_val.downcast::<pyo3::types::PyList>()?;
+            
+            for sub_stmt in func_body.iter() {
+                let sub_class = sub_stmt.getattr("__class__")?.getattr("__name__")?.extract::<String>()?;
+                if sub_class == "Assign" {
+                    let value = sub_stmt.getattr("value")?;
+                    let val_class = value.getattr("__class__")?.getattr("__name__")?.extract::<String>()?;
+                    
+                    if val_class == "BinOp" {
+                        let left = value.getattr("left")?;
+                        let right = value.getattr("right")?;
+                        let op = value.getattr("op")?.getattr("__class__")?.getattr("__name__")?.extract::<String>()?;
+                        
+                        let left_name: String = if left.hasattr("id")? {
+                            left.getattr("id")?.extract()?
+                        } else {
+                            "constant".to_string()
+                        };
+                        let right_name: String = if right.hasattr("id")? {
+                            right.getattr("id")?.extract()?
+                        } else {
+                            "constant".to_string()
+                        };
+                        
+                        let left_id = *var_map.entry(left_name).or_insert_with(|| {
+                            let id = next_val_id;
+                            next_val_id += 1;
+                            compiler.register_value(id, "float32".to_string(), vec![1]);
+                            id
+                        });
+                        
+                        let right_id = *var_map.entry(right_name).or_insert_with(|| {
+                            let id = next_val_id;
+                            next_val_id += 1;
+                            compiler.register_value(id, "float32".to_string(), vec![1]);
+                            id
+                        });
+                        
+                        let targets_val = sub_stmt.getattr("targets")?;
+                        let targets = targets_val.downcast::<pyo3::types::PyList>()?;
+                        let target_name: String = targets.get_item(0)?.getattr("id")?.extract()?;
+                        let out_id = next_val_id;
+                        next_val_id += 1;
+                        var_map.insert(target_name, out_id);
+                        compiler.register_value(out_id, "float32".to_string(), vec![1]);
+                        
+                        let mut attrs = HashMap::new();
+                        attrs.insert("op".to_string(), op);
+                        compiler.add_node("binop".to_string(), vec![left_id, right_id], vec![out_id], attrs);
+                    }
+                } else if sub_class == "If" {
+                    let test = sub_stmt.getattr("test")?;
+                    let test_class = test.getattr("__class__")?.getattr("__name__")?.extract::<String>()?;
+                    if test_class == "Compare" {
+                        let left = test.getattr("left")?;
+                        let left_name: String = left.getattr("id")?.extract()?;
+                        let left_id = *var_map.entry(left_name).or_insert(1);
+                        
+                        let mut attrs = HashMap::new();
+                        attrs.insert("control_flow".to_string(), "if_branch".to_string());
+                        
+                        let if_body_val = sub_stmt.getattr("body")?;
+                        let if_body = if_body_val.downcast::<pyo3::types::PyList>()?;
+                        for body_stmt in if_body.iter() {
+                            let b_class = body_stmt.getattr("__class__")?.getattr("__name__")?.extract::<String>()?;
+                            if b_class == "Assign" {
+                                let targets_val = body_stmt.getattr("targets")?;
+                                let targets = targets_val.downcast::<pyo3::types::PyList>()?;
+                                let target_name: String = targets.get_item(0)?.getattr("id")?.extract()?;
+                                let val_id = *var_map.entry(target_name).or_insert(1);
+                                compiler.add_node("if_true_assign".to_string(), vec![left_id], vec![val_id], attrs.clone());
+                            }
+                        }
+                    }
+                } else if sub_class == "For" {
+                    let target = sub_stmt.getattr("target")?;
+                    let target_name: String = target.getattr("id")?.extract()?;
+                    let loop_var_id = *var_map.entry(target_name).or_insert(1);
+                    
+                    let mut attrs = HashMap::new();
+                    attrs.insert("control_flow".to_string(), "for_loop".to_string());
+                    
+                    let for_body_val = sub_stmt.getattr("body")?;
+                    let for_body = for_body_val.downcast::<pyo3::types::PyList>()?;
+                    for body_stmt in for_body.iter() {
+                        let b_class = body_stmt.getattr("__class__")?.getattr("__name__")?.extract::<String>()?;
+                        if b_class == "Assign" {
+                            let targets_val = body_stmt.getattr("targets")?;
+                            let targets = targets_val.downcast::<pyo3::types::PyList>()?;
+                            let target_name: String = targets.get_item(0)?.getattr("id")?.extract()?;
+                            let val_id = *var_map.entry(target_name).or_insert(1);
+                            compiler.add_node("for_loop_body_assign".to_string(), vec![loop_var_id], vec![val_id], attrs.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    compiler.compile_and_optimize()?;
+    Ok(compiler)
+}

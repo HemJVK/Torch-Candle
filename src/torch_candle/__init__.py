@@ -1,8 +1,6 @@
 import numpy as np
 import math
 
-from .ctypes_mmap import tune_glibc_allocator
-tune_glibc_allocator()
 
 import torch_candle_backend as _kernels
 

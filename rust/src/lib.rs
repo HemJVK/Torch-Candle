@@ -2019,8 +2019,42 @@ pub mod extension_api {
     }
 }
 
+extern "C" {
+    fn mallopt(param: std::os::raw::c_int, value: std::os::raw::c_int) -> std::os::raw::c_int;
+}
+
+use std::cell::RefCell;
+
+thread_local! {
+    static DISPATCH_STACK: RefCell<Vec<String>> = RefCell::new(Vec::new());
+}
+
+#[pyfunction]
+fn push_dispatch_level(level_id: String) {
+    DISPATCH_STACK.with(|stack| {
+        stack.borrow_mut().push(level_id);
+    });
+}
+
+#[pyfunction]
+fn pop_dispatch_level() -> Option<String> {
+    DISPATCH_STACK.with(|stack| {
+        stack.borrow_mut().pop()
+    })
+}
+
+#[pyfunction]
+fn get_active_dispatch_level() -> usize {
+    DISPATCH_STACK.with(|stack| {
+        stack.borrow().len()
+    })
+}
+
 #[pymodule]
 fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    unsafe {
+        mallopt(3, 131072);
+    }
     m.add_class::<PyTensor>()?;
     m.add_class::<ipc::SPSCRingBuffer>()?;
     m.add_class::<ipc::TaskMetadata>()?;
@@ -2044,5 +2078,9 @@ fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_enable_sha, m)?)?;
     m.add_function(wrap_pyfunction!(get_enable_sha, m)?)?;
     m.add_function(wrap_pyfunction!(clear_grad_history, m)?)?;
+    m.add_function(wrap_pyfunction!(push_dispatch_level, m)?)?;
+    m.add_function(wrap_pyfunction!(pop_dispatch_level, m)?)?;
+    m.add_function(wrap_pyfunction!(get_active_dispatch_level, m)?)?;
+    m.add_function(wrap_pyfunction!(jit::compile_ast, m)?)?;
     Ok(())
 }
