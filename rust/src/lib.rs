@@ -1008,6 +1008,22 @@ impl PyTensor {
         self.retrieve_grad(py, None)
     }
 
+    fn get_raw_grad(&self) -> PyResult<Option<PyTensor>> {
+        if let Some(ref g_mutex) = self.grad {
+            let g_opt = g_mutex.lock();
+            if let Some(ref g) = *g_opt {
+                return Ok(Some(PyTensor {
+                    inner: g.clone(),
+                    grad: None,
+                    grad_fn: None,
+                    requires_grad: false,
+                    parents: Vec::new(),
+                }));
+            }
+        }
+        Ok(None)
+    }
+
     #[pyo3(signature = (py_param_id=None))]
     fn retrieve_grad(&self, py: Python<'_>, py_param_id: Option<usize>) -> PyResult<Option<PyTensor>> {
         if let Some(ref g_mutex) = self.grad {

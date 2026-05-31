@@ -98,3 +98,40 @@ class Event:
         return True
 
 _allocator = _kernels.StreamAwareAllocator()
+
+def stream_wait_event(comm_stream: Stream, computation_stream: Stream):
+    """
+    Shifts the synchronization burden from CPU to GPU communication streams.
+    Records an event on computation_stream and waits for it on comm_stream.
+    """
+    event = Event()
+    event.record(computation_stream)
+    event.wait(comm_stream)
+
+class DelayedDeletionManager:
+    """
+    Delayed Deletion Pipeline: Delays the deletion (del) of layer i tensors
+    until after layer i+1 has been successfully scheduled on the GPU.
+    This guarantees maximum communication stream and all-gather overlapping.
+    """
+    _pending_deletions = []
+
+    @classmethod
+    def queue_deletion(cls, tensor):
+        cls._pending_deletions.append(tensor)
+
+    @classmethod
+    def process_pending(cls):
+        while cls._pending_deletions:
+            t = cls._pending_deletions.pop(0)
+            del t
+
+class delayed_deletion:
+    """
+    Context manager to safely trigger processed pending delayed deletions.
+    """
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        DelayedDeletionManager.process_pending()

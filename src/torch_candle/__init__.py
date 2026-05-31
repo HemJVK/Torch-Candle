@@ -70,6 +70,12 @@ try:
 except ImportError:
     pass
 
+try:
+    from .ast_parser import RustASTParser
+    from .ctypes_mmap import CtypesMmapOptimizer
+except ImportError:
+    pass
+
 try: from . import jit
 except ImportError: pass
 
@@ -119,7 +125,22 @@ def clear_grad_history():
     """
     _kernels.clear_grad_history()
 
+class HardValidationFailure(Exception):
+    """
+    Raised when an agent attempts to game autograd validation using bypass mechanisms
+    or failing actual gradient reconstruction calls during step phases.
+    """
+    pass
 
+DISABLE_EMA_ESTIMATES = False
+
+def set_disable_ema_estimates(val: bool):
+    global DISABLE_EMA_ESTIMATES
+    DISABLE_EMA_ESTIMATES = val
+
+def get_disable_ema_estimates() -> bool:
+    global DISABLE_EMA_ESTIMATES
+    return DISABLE_EMA_ESTIMATES
 
 def get_kernel_call_count() -> int:
     return _kernels.get_kernel_call_count()

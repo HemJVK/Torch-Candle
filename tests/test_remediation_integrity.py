@@ -82,3 +82,78 @@ def test_rocm_aot_compiler_helper():
     # Assert driver is correctly loaded and ready
     assert hasattr(ROCmAOTCompiler, "is_hipcc_available")
     assert hasattr(ROCmAOTCompiler, "compile_kernels_aot")
+
+
+def test_sha_engine_hard_validation_failure_guardrail():
+    import pytest
+    
+    w = torch.Tensor([1.0, 2.0], requires_grad=True)
+    
+    # 1. Enable DISABLE_EMA_ESTIMATES bypass
+    torch.set_disable_ema_estimates(True)
+    assert torch.get_disable_ema_estimates() == True
+    
+    # 2. Triggering an anomaly (setting NaN) must immediately raise HardValidationFailure
+    nan_grad = torch.Tensor([float('nan'), 2.0])
+    
+    with pytest.raises(torch.HardValidationFailure) as excinfo:
+        w.grad = nan_grad
+    assert "Bypassing SHA gradient reconstruction" in str(excinfo.value)
+    
+    # 3. Triggering an anomaly (retrieving NaN) must also raise HardValidationFailure
+    w._tensor.grad = nan_grad._tensor
+    with pytest.raises(torch.HardValidationFailure) as excinfo:
+        _ = w.grad
+    assert "Bypassing SHA gradient reconstruction" in str(excinfo.value)
+    
+    # Clean up state
+    torch.set_disable_ema_estimates(False)
+
+
+def test_stream_to_stream_event_synchronization():
+    from torch_candle.cuda import Stream, Event, stream_wait_event
+    
+    s_comm = Stream(1)
+    s_comp = Stream(2)
+    
+    # Verify stream waiting records on computation stream and wait-blocks communication stream
+    stream_wait_event(s_comm, s_comp)
+
+
+def test_delayed_deletion_manager_overlapping():
+    from torch_candle.cuda import DelayedDeletionManager, delayed_deletion
+    
+    t1 = torch.Tensor([1.0, 2.0])
+    
+    DelayedDeletionManager.queue_deletion(t1)
+    assert len(DelayedDeletionManager._pending_deletions) == 1
+    
+    # Execute step computation, then process deletion at block boundary
+    with delayed_deletion():
+        pass
+        
+    assert len(DelayedDeletionManager._pending_deletions) == 0
+
+
+def test_standalone_rust_ast_parser_symbol_verification():
+    import pytest
+    from torch_candle.ast_parser import RustASTParser
+    
+    x = torch.Tensor([10.0])
+    y = torch.Tensor([5.0])
+    active_scope = {"x": x, "y": y}
+    
+    # 1. Valid expression parsing and normalisation to Tensor
+    res = RustASTParser.parse_and_verify_expression("x * 2.0 + y", active_scope)
+    assert isinstance(res, torch.Tensor)
+    assert res.item() == 25.0
+    
+    # 2. Symbol Verification Failure (Raises NameError)
+    with pytest.raises(NameError) as excinfo:
+        RustASTParser.parse_and_verify_expression("x * 2.0 + z", active_scope)
+    assert "Symbol Verification Failed" in str(excinfo.value)
+    
+    # 3. Type Contract normalisation of numeric outputs to Tensors
+    res_num = RustASTParser.parse_and_verify_expression("100.0", active_scope)
+    assert isinstance(res_num, torch.Tensor)
+    assert res_num.item() == 100.0

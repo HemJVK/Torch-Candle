@@ -128,13 +128,57 @@ class Tensor:
 
     @property
     def grad(self):
+        import torch_candle as torch
+        import numpy as np
+        import os
+        disable_ema = getattr(torch, "DISABLE_EMA_ESTIMATES", False) or (os.environ.get("DISABLE_EMA_ESTIMATES") in ("1", "true", "True"))
+
+        if disable_ema:
+            raw_g = self._tensor.get_raw_grad()
+            if raw_g is not None:
+                try:
+                    arr = raw_g.to_numpy()
+                    if np.isnan(arr).any() or np.isinf(arr).any():
+                        raise torch.HardValidationFailure(
+                            "🚨 [SHA Guardrail] HardValidationFailure: Bypassing SHA gradient reconstruction with DISABLE_EMA_ESTIMATES active is FORBIDDEN when numerical anomalies (NaN/Inf) are detected!"
+                        )
+                except Exception as e:
+                    if isinstance(e, torch.HardValidationFailure):
+                        raise e
+
         g = self._tensor.retrieve_grad(id(self))
         if g is None:
             return None
-        return self._fast_wrap(g, dtype=self.dtype)
+        wrapped = self._fast_wrap(g, dtype=self.dtype)
+        
+        arr = wrapped.numpy()
+        if np.isnan(arr).any() or np.isinf(arr).any():
+            if disable_ema:
+                raise torch.HardValidationFailure(
+                    "🚨 [SHA Guardrail] HardValidationFailure: Bypassing SHA gradient reconstruction with DISABLE_EMA_ESTIMATES active is FORBIDDEN when numerical anomalies (NaN/Inf) are detected!"
+                )
+        return wrapped
 
     @grad.setter
     def grad(self, value):
+        import torch_candle as torch
+        import numpy as np
+        import os
+        disable_ema = getattr(torch, "DISABLE_EMA_ESTIMATES", False) or (os.environ.get("DISABLE_EMA_ESTIMATES") in ("1", "true", "True"))
+
+        if value is not None:
+            arr = None
+            if isinstance(value, Tensor):
+                arr = value.numpy()
+            elif isinstance(value, (list, tuple, np.ndarray)):
+                arr = np.array(value)
+            
+            if arr is not None and (np.isnan(arr).any() or np.isinf(arr).any()):
+                if disable_ema:
+                    raise torch.HardValidationFailure(
+                        "🚨 [SHA Guardrail] HardValidationFailure: Bypassing SHA gradient reconstruction with DISABLE_EMA_ESTIMATES active is FORBIDDEN when numerical anomalies (NaN/Inf) are detected!"
+                    )
+
         if value is None:
             self._tensor.grad = None
         elif isinstance(value, Tensor):
