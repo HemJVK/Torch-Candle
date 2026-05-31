@@ -357,3 +357,114 @@ class AttnBiasTensor(Tensor):
         if dropout_p > 0.0:
             attn_weights = dropout(attn_weights, p=dropout_p, training=True)
         return attn_weights.matmul(value)
+
+
+def jacrev(func, argnums=0):
+    """
+    Computes the Jacobian of `func` with respect to the argument at `argnums`
+    using reverse-mode automatic differentiation, with finite-difference fallback
+    for non-differentiable/gradient outputs.
+    """
+    def wrapped(*args, **kwargs):
+        x = args[argnums]
+        
+        # Clone to avoid in-place side effects
+        x_in = x.clone()
+        x_in.requires_grad = True
+        
+        new_args = list(args)
+        new_args[argnums] = x_in
+        
+        out = func(*new_args, **kwargs)
+        
+        if not out.requires_grad:
+            # Finite difference fallback
+            import numpy as np
+            from torch_candle import Tensor
+            h = 1e-3
+            x_np = x.numpy()
+            jacobian_rows = []
+            flat_x = x_np.ravel()
+            numel = len(flat_x)
+            
+            for i in range(numel):
+                x_plus = x_np.copy()
+                x_plus.flat[i] += h
+                args_plus = list(args)
+                args_plus[argnums] = Tensor(x_plus)
+                out_plus = func(*args_plus, **kwargs)
+                
+                x_minus = x_np.copy()
+                x_minus.flat[i] -= h
+                args_minus = list(args)
+                args_minus[argnums] = Tensor(x_minus)
+                out_minus = func(*args_minus, **kwargs)
+                
+                diff = (out_plus - out_minus) / (2.0 * h)
+                jacobian_rows.append(diff)
+                
+            from torch_candle import stack
+            return stack(jacobian_rows, dim=0).reshape(out.shape + x.shape)
+            
+        out_shape = out.shape
+        out_numel = out.numel()
+        
+        jacobian_rows = []
+        
+        for i in range(out_numel):
+            if x_in.grad is not None:
+                x_in.grad = None
+            
+            # Create a one-hot vector for coordinate i
+            import numpy as np
+            from torch_candle import Tensor
+            one_hot_np = np.zeros(out_numel, dtype=np.float32)
+            one_hot_np[i] = 1.0
+            grad_tensor = Tensor(one_hot_np).reshape(out_shape)
+            
+            out.backward(grad_tensor, retain_graph=True)
+            
+            if x_in.grad is not None:
+                jacobian_rows.append(x_in.grad.clone())
+            else:
+                jacobian_rows.append(x_in.zeros_like())
+                
+        from torch_candle import stack
+        return stack(jacobian_rows, dim=0).reshape(out_shape + x.shape)
+        
+    return wrapped
+
+
+def hessian(func, argnums=0):
+    """
+    Computes the Hessian matrix of `func` with respect to the argument at `argnums`.
+    """
+    return jacrev(grad(func, argnums=argnums), argnums=argnums)
+
+
+class DynamicSubclassDispatcher:
+    """
+    True Dynamic Subclass Dispatcher for torch.func transformations.
+    Performs state purification of stateful nn.Module objects and wraps them
+    for vmap, jacrev, and hessian execution.
+    """
+    @staticmethod
+    def purify(module):
+        """
+        State Purification: lifts parameters and buffers into explicit arguments,
+        returning a pure function.
+        """
+        return make_functional(module)
+
+    @staticmethod
+    def vmap(func, in_dims=0, out_dims=0):
+        return vmap(func, in_dims, out_dims)
+
+    @staticmethod
+    def jacrev(func, argnums=0):
+        return jacrev(func, argnums)
+
+    @staticmethod
+    def hessian(func, argnums=0):
+        return hessian(func, argnums)
+

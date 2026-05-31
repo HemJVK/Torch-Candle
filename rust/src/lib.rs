@@ -1025,81 +1025,12 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (py_param_id=None))]
-    fn retrieve_grad(&self, py: Python<'_>, py_param_id: Option<usize>) -> PyResult<Option<PyTensor>> {
+    fn retrieve_grad(&self, _py: Python<'_>, py_param_id: Option<usize>) -> PyResult<Option<PyTensor>> {
         if let Some(ref g_mutex) = self.grad {
-            let mut g_opt = g_mutex.lock();
+            let g_opt = g_mutex.lock();
             if let Some(ref g) = *g_opt {
-                let mut res_g = g.clone();
-                let sha_enabled = ENABLE_SHA.load(std::sync::atomic::Ordering::Relaxed)
-                    && get_python_enable_sha(py);
-                
-                if self.requires_grad && sha_enabled {
-                    let shape = res_g.dims().to_vec();
-                    if let Ok(grad_vec) = res_g.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
-                        let mut has_anomaly = false;
-                        for &x in &grad_vec {
-                            if x.is_nan() || x.is_infinite() {
-                                has_anomaly = true;
-                                break;
-                            }
-                        }
-                        
-                        let param_key = py_param_id.unwrap_or_else(|| Arc::as_ptr(g_mutex) as usize);
-                        
-                        if has_anomaly {
-                            println!("⚠️ [Self-Healing Autograd] Recovered anomalous gradient (NaN/Inf) on parameter!");
-                            let mut healed = false;
-                            let mut healthy_vec = vec![0.0f32; grad_vec.len()];
-                            
-                            if let Some(param_id) = py_param_id {
-                                if let Some((_, hist_vec)) = get_python_grad_history(py, param_id) {
-                                    if hist_vec.len() == grad_vec.len() {
-                                        healthy_vec = hist_vec;
-                                        healed = true;
-                                    }
-                                }
-                            }
-                            
-                            if !healed {
-                                if let Some(ref history_map) = *GRAD_HISTORY.lock() {
-                                    if let Some(hist_vec) = history_map.get(&param_key) {
-                                        if hist_vec.len() == grad_vec.len() {
-                                            healthy_vec = hist_vec.clone();
-                                            healed = true;
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            let mut healed_grad = grad_vec.clone();
-                            for i in 0..healed_grad.len() {
-                                if healed_grad[i].is_nan() || healed_grad[i].is_infinite() {
-                                    healed_grad[i] = healthy_vec[i];
-                                }
-                            }
-                            
-                            if let Ok(healed_tensor) = Tensor::from_slice(&healed_grad, shape.as_slice(), res_g.device()) {
-                                res_g = healed_tensor;
-                                *g_opt = Some(res_g.clone());
-                            }
-                        } else {
-                            let mut history_opt = GRAD_HISTORY.lock();
-                            let history = history_opt.get_or_insert_with(HashMap::new);
-                            let entry = history.entry(param_key).or_insert_with(|| grad_vec.clone());
-                            if entry.len() != grad_vec.len() {
-                                *entry = grad_vec.clone();
-                            } else {
-                                let ema_factor = 0.9f32;
-                                for i in 0..entry.len() {
-                                    entry[i] = ema_factor * entry[i] + (1.0 - ema_factor) * grad_vec[i];
-                                }
-                            }
-                        }
-                    }
-                }
-                
                 return Ok(Some(PyTensor {
-                    inner: res_g,
+                    inner: g.clone(),
                     grad: None,
                     grad_fn: None,
                     requires_grad: false,
@@ -1397,61 +1328,12 @@ impl PyTensor {
                 let parent_grads = node.backward(&current_grad);
                 for (parent, maybe_grad) in tensor.parents.iter().zip(parent_grads) {
                     if let Some(p_grad) = maybe_grad {
-                        let mut sanitized_grad = p_grad.clone();
-                        
                         if let Some(ref pg_mutex) = parent.grad {
-                            let param_key = Arc::as_ptr(pg_mutex) as usize;
-                            
-                            if let Ok(flat_vec) = p_grad.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
-                                let mut has_anomaly = false;
-                                for &x in &flat_vec {
-                                    if x.is_nan() || x.is_infinite() {
-                                        has_anomaly = true;
-                                        break;
-                                    }
-                                }
-                                
-                                let mut history_opt = GRAD_HISTORY.lock();
-                                let history = history_opt.get_or_insert_with(HashMap::new);
-                                
-                                if has_anomaly {
-                                    println!("🚨 [Autograd Tape] Element-level anomaly intercepted in backward pass! Performing mathematical reconstruction using EMA history...");
-                                    let mut healthy_vec = vec![0.0f32; flat_vec.len()];
-                                    if let Some(hist_vec) = history.get(&param_key) {
-                                        if hist_vec.len() == flat_vec.len() {
-                                            healthy_vec = hist_vec.clone();
-                                        }
-                                    }
-                                    
-                                    let mut healed_grad = flat_vec.clone();
-                                    for i in 0..healed_grad.len() {
-                                        if healed_grad[i].is_nan() || healed_grad[i].is_infinite() {
-                                            healed_grad[i] = healthy_vec[i];
-                                        }
-                                    }
-                                    
-                                    let shape = p_grad.dims().to_vec();
-                                    sanitized_grad = Tensor::from_vec(healed_grad, shape.as_slice(), p_grad.device())
-                                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
-                                } else {
-                                    // Update EMA history for this parent gradient
-                                    let entry = history.entry(param_key).or_insert_with(|| flat_vec.clone());
-                                    if entry.len() == flat_vec.len() {
-                                        let beta = 0.9f32;
-                                        for i in 0..entry.len() {
-                                            entry[i] = beta * entry[i] + (1.0 - beta) * flat_vec[i];
-                                        }
-                                    } else {
-                                        *entry = flat_vec.clone();
-                                    }
-                                }
-                            }
-                            
                             let mut pg_opt = pg_mutex.lock();
                             if let Some(ref current_pg) = *pg_opt {
-                                *pg_opt = Some(current_pg.add(&sanitized_grad).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?);
+                                *pg_opt = Some(current_pg.add(&p_grad).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?);
                             } else {
-                                *pg_opt = Some(sanitized_grad);
+                                *pg_opt = Some(p_grad);
                             }
                         }
                     }
@@ -2050,20 +1932,15 @@ fn vectorized_forward(
 }
 
 #[pyfunction]
-fn set_enable_sha(val: bool) {
-    ENABLE_SHA.store(val, std::sync::atomic::Ordering::Relaxed);
-}
+fn set_enable_sha(_val: bool) {}
 
 #[pyfunction]
 fn get_enable_sha() -> bool {
-    ENABLE_SHA.load(std::sync::atomic::Ordering::Relaxed)
+    false
 }
 
 #[pyfunction]
-fn clear_grad_history() {
-    let mut history_opt = GRAD_HISTORY.lock();
-    *history_opt = Some(HashMap::new());
-}
+fn clear_grad_history() {}
 
 
 

@@ -4,37 +4,10 @@ import numpy as np
 import json
 
 def test_strict_ema_reconstruction_heterogeneous():
-    # 1. Establish history using standard tuple
+    # Verify that setting NaN propagates and is retained (EMA healing is forbidden)
     w = torch.Tensor([3.0], requires_grad=True)
-    loss = w * 3.0
-    loss.backward()
-    assert w.grad.item() == 3.0
-    
-    # 2. Simulate heterogeneous dictionary format in _grad_history
-    w_dict = torch.Tensor([3.0], requires_grad=True)
-    torch.Tensor._grad_history[id(w_dict)] = {
-        "shape": [1],
-        "data": [3.0]
-    }
-    w_dict.grad = torch.Tensor([float('nan')])
-    
-    # Retrieves should trigger strict SHA reconstruction and parse PyDict format perfectly!
-    healed_dict = w_dict.grad
-    assert not np.isnan(healed_dict.item())
-    assert healed_dict.item() == 3.0
-    
-    # 3. Simulate heterogeneous JSON format in _grad_history
-    w_json = torch.Tensor([3.0], requires_grad=True)
-    torch.Tensor._grad_history[id(w_json)] = json.dumps({
-        "shape": [1],
-        "data": [3.0]
-    })
-    w_json.grad = torch.Tensor([float('nan')])
-    
-    # Retrieves should trigger strict SHA reconstruction and parse PyString JSON format perfectly!
-    healed_json = w_json.grad
-    assert not np.isnan(healed_json.item())
-    assert healed_json.item() == 3.0
+    w.grad = torch.Tensor([float('nan')])
+    assert np.isnan(w.grad.item())
 
 
 def test_logical_blockfree_caching():
@@ -85,29 +58,10 @@ def test_rocm_aot_compiler_helper():
 
 
 def test_sha_engine_hard_validation_failure_guardrail():
-    import pytest
-    
     w = torch.Tensor([1.0, 2.0], requires_grad=True)
-    
-    # 1. Enable DISABLE_EMA_ESTIMATES bypass
-    torch.set_disable_ema_estimates(True)
-    assert torch.get_disable_ema_estimates() == True
-    
-    # 2. Triggering an anomaly (setting NaN) must immediately raise HardValidationFailure
     nan_grad = torch.Tensor([float('nan'), 2.0])
-    
-    with pytest.raises(torch.HardValidationFailure) as excinfo:
-        w.grad = nan_grad
-    assert "Bypassing SHA gradient reconstruction" in str(excinfo.value)
-    
-    # 3. Triggering an anomaly (retrieving NaN) must also raise HardValidationFailure
-    w._tensor.grad = nan_grad._tensor
-    with pytest.raises(torch.HardValidationFailure) as excinfo:
-        _ = w.grad
-    assert "Bypassing SHA gradient reconstruction" in str(excinfo.value)
-    
-    # Clean up state
-    torch.set_disable_ema_estimates(False)
+    w.grad = nan_grad
+    assert np.isnan(w.grad.numpy()[0])
 
 
 def test_stream_to_stream_event_synchronization():
@@ -262,28 +216,7 @@ def test_autograd_ema_trajectory_healing():
     import torch_candle as torch
     import numpy as np
     
-    # Clear history
-    from torch_candle_backend import clear_grad_history
-    clear_grad_history()
-    
-    # 1. Establish stable gradient history (g_t-1)
-    w = torch.Tensor([5.0], requires_grad=True)
-    loss = w * 2.0
-    loss.backward()
-    assert w.grad.item() == 2.0
-    
-    # 2. Trigger nan gradient propagation
     w_anom = torch.Tensor([5.0], requires_grad=True)
-    # Put history in GRAD_HISTORY
-    torch.Tensor._grad_history[id(w_anom)] = {
-        "shape": [1],
-        "data": [2.0]
-    }
-    
-    # Set gradient directly to nan/inf to trigger healing
     w_anom.grad = torch.Tensor([float('nan')])
-    
-    # Assert it gets reconstructed/healed to the historical 2.0 instead of being clipped to 0.0!
-    healed = w_anom.grad
-    assert healed.item() == 2.0
+    assert np.isnan(w_anom.grad.item())
 

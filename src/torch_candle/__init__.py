@@ -66,7 +66,10 @@ except ImportError: pass
 
 try:
     from . import func
-    from .func import subclass_dispatch, AttnBiasTensor
+    from .func import (
+        subclass_dispatch, AttnBiasTensor, jacrev, hessian,
+        DynamicSubclassDispatcher, make_functional, vmap, grad
+    )
 except ImportError:
     pass
 

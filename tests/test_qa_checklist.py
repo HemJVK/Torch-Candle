@@ -37,42 +37,23 @@ def test_shared_memory_ipc_stability():
 
 # 2. Numerical Stability (SHA) Anomaly Injection & Recovery
 def test_sha_numerical_stability():
-    # Test standard gradient collapse (enable_sha = False)
-    torch.Tensor.enable_sha = False
-    if hasattr(torch.Tensor, "_grad_history"):
-        torch.Tensor._grad_history.clear()
-        
+    # Test standard gradient propagation of NaNs (Self-healing is decommissioned)
     w_std = torch.Tensor([5.0], requires_grad=True)
-    # Establish history step 1
     loss1 = w_std * 2.0
     loss1.backward()
-    _ = w_std.grad # Access to populate history (if enabled)
     
     # Inject NaN directly simulating mathematical explosion
     w_std.grad = torch.Tensor([float('nan')])
-    assert np.isnan(w_std.grad.item()), "NaN was not retained when SHA is disabled"
-
-    # Test Self-Healing Autograd Recovery (enable_sha = True)
-    torch.Tensor.enable_sha = True
-    if hasattr(torch.Tensor, "_grad_history"):
-        torch.Tensor._grad_history.clear()
-    torch.clear_grad_history()
+    assert np.isnan(w_std.grad.item()), "NaN was not retained"
 
     w_sha = torch.Tensor([5.0], requires_grad=True)
-    # Step 1: establish a healthy gradient history
     loss_healthy = w_sha * 3.0
     loss_healthy.backward()
-    
-    # Access w_sha.grad to record the healthy history step (grad should be 3.0)
     assert w_sha.grad.item() == 3.0
     
-    # Step 2: inject anomaly gradient (NaN)
+    # Inject anomaly gradient (NaN)
     w_sha.grad = torch.Tensor([float('nan')])
-    
-    # Accessing w_sha.grad must trigger the Self-Healing Autograd engine!
-    healed_grad = w_sha.grad
-    assert not np.isnan(healed_grad.item()), "SHA failed to intercept and heal NaN gradient"
-    assert healed_grad.item() == 3.0, f"SHA reconstructed incorrect gradient value: {healed_grad.item()}"
+    assert np.isnan(w_sha.grad.item()), "NaN was not propagated"
 
 # 3. Auto-Device Alignment Discovery & Stress Test
 def test_auto_device_alignment_stress():
