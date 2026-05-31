@@ -51,15 +51,15 @@ class MaturinBuildExtension(build_ext):
         if use_xpu == "1":
             print("  Features:   Enabling Intel XPU (Intel GPU Support) hardware acceleration.")
             
-        print(f"  Build Cmd:  maturin develop --working-directory rust --features {','.join(features)}")
+        print(f"  Build Cmd:  maturin develop --manifest-path rust/Cargo.toml --features {','.join(features)}")
         print("=" * 80 + "\n")
         
         # Delegate compilation to maturin
         cmd = [
             "maturin",
             "develop",
-            "--working-directory",
-            "rust",
+            "--manifest-path",
+            "rust/Cargo.toml",
             "--features",
             ",".join(features)
         ]

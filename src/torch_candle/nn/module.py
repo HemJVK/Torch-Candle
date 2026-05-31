@@ -47,6 +47,25 @@ class Module:
                     submodule_prefix = prefix + name + '.'
                     yield from module.named_parameters(submodule_prefix, recurse)
 
+    def buffers(self, recurse=True):
+        for name, buf in self._buffers.items():
+            if buf is not None:
+                yield buf
+        if recurse:
+            for name, module in self._modules.items():
+                if module is not None:
+                    yield from module.buffers(recurse)
+
+    def named_buffers(self, prefix='', recurse=True):
+        for name, buf in self._buffers.items():
+            if buf is not None:
+                yield prefix + name, buf
+        if recurse:
+            for name, module in self._modules.items():
+                if module is not None:
+                    submodule_prefix = prefix + name + '.'
+                    yield from module.named_buffers(submodule_prefix, recurse)
+
     def forward(self, *input):
         raise NotImplementedError
 

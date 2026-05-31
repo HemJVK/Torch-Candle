@@ -88,6 +88,34 @@ try: from . import backends
 except ImportError: pass
 
 # ============================================================
+# Decentralized Backend Dispatch Registry APIs
+# ============================================================
+def register_privateuse1_backend(backend_name: str):
+    """
+    Statically or dynamically register a new hardware backend for Torch-Candle.
+    Exposes stable public APIs matching torch.register_privateuse1_backend.
+    """
+    _kernels.PyDispatchRegistry.register_backend(backend_name)
+
+def register_kernel(op_name: str, backend_name: str, kernel):
+    """
+    Register a dynamic dispatch kernel for a specific operator and hardware backend.
+    """
+    _kernels.PyDispatchRegistry.register_kernel(op_name, backend_name, kernel)
+
+def dispatch_kernel(op_name: str, backend_name: str, *args):
+    """
+    Dynamically dispatch an operator to a registered backend kernel.
+    """
+    return _kernels.PyDispatchRegistry.dispatch(op_name, backend_name, args)
+
+def clear_grad_history():
+    """
+    Clear the running gradient histories used by Self-Healing Autograd.
+    """
+    _kernels.clear_grad_history()
+
+# ============================================================
 # Context Managers — torch.no_grad / enable_grad
 # ============================================================
 class no_grad:

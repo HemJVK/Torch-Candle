@@ -168,3 +168,118 @@ def jvp(func, primals, tangents):
     outputs.backward(tangents)
     tangents_out = tuple(p.grad for p in primals)
     return outputs, tangents_out
+
+def functional_call(module, parameter_and_buffer_dict, args, kwargs=None):
+    """
+    Call a stateless functional forward pass on a stateful module by replacing 
+    parameters/buffers with dynamic ones.
+    """
+    if kwargs is None:
+        kwargs = {}
+    
+    # Save original attributes to restore later
+    original_attrs = {}
+    try:
+        for key, value in parameter_and_buffer_dict.items():
+            parts = key.split('.')
+            sub_mod = module
+            for part in parts[:-1]:
+                sub_mod = getattr(sub_mod, part)
+            attr_name = parts[-1]
+            
+            # Record original value if present
+            if hasattr(sub_mod, attr_name):
+                original_attrs[key] = (sub_mod, attr_name, getattr(sub_mod, attr_name))
+            else:
+                original_attrs[key] = (sub_mod, attr_name, None)
+            
+            # Set target value
+            setattr(sub_mod, attr_name, value)
+            
+            # Also update module internal parameters/buffers maps to ensure named_parameters returns it
+            from torch_candle.nn import Parameter
+            if isinstance(value, Parameter):
+                sub_mod._parameters[attr_name] = value
+            elif attr_name in sub_mod._parameters:
+                # If replacing a Parameter with a Tensor (common in functional APIs), map it to _parameters
+                sub_mod._parameters[attr_name] = value
+            elif attr_name in sub_mod._buffers:
+                sub_mod._buffers[attr_name] = value
+                
+        return module(*args, **kwargs)
+    finally:
+        # Restore all original values
+        for key, (sub_mod, attr_name, orig_val) in original_attrs.items():
+            if orig_val is None:
+                if hasattr(sub_mod, attr_name):
+                    delattr(sub_mod, attr_name)
+                sub_mod._parameters.pop(attr_name, None)
+                sub_mod._buffers.pop(attr_name, None)
+            else:
+                setattr(sub_mod, attr_name, orig_val)
+                from torch_candle.nn import Parameter
+                if isinstance(orig_val, Parameter):
+                    sub_mod._parameters[attr_name] = orig_val
+                elif attr_name in sub_mod._parameters:
+                    sub_mod._parameters[attr_name] = orig_val
+                elif attr_name in sub_mod._buffers:
+                    sub_mod._buffers[attr_name] = orig_val
+
+def make_functional(module):
+    """
+    Exposes a stateless functional wrapper for a Module.
+    Returns:
+        func: function of signature (params, *args, **kwargs)
+        params: tuple of Tensors/Parameters
+    """
+    param_names = []
+    params = []
+    
+    for name, param in module.named_parameters():
+        param_names.append(name)
+        params.append(param)
+        
+    for name, buf in module.named_buffers():
+        param_names.append(name)
+        params.append(buf)
+        
+    def func(params_tuple, *args, **kwargs):
+        param_dict = {name: val for name, val in zip(param_names, params_tuple)}
+        return functional_call(module, param_dict, args, kwargs)
+        
+    return func, tuple(params)
+
+def stack_module_state(models):
+    """
+    Stack parameters and buffers across multiple models of the same class for parallelized execution.
+    """
+    if not models:
+        return {}, {}
+    
+    from torch_candle import stack
+    
+    # Extract states from all models
+    param_dicts = []
+    buffer_dicts = []
+    
+    for model in models:
+        p_dict = {name: param for name, param in model.named_parameters()}
+        b_dict = {name: buf for name, buf in model.named_buffers()}
+        param_dicts.append(p_dict)
+        buffer_dicts.append(b_dict)
+        
+    stacked_params = {}
+    if param_dicts and param_dicts[0]:
+        keys = param_dicts[0].keys()
+        for key in keys:
+            tensors = [d[key] for d in param_dicts]
+            stacked_params[key] = stack(tensors, dim=0)
+            
+    stacked_buffers = {}
+    if buffer_dicts and buffer_dicts[0]:
+        keys = buffer_dicts[0].keys()
+        for key in keys:
+            tensors = [d[key] for d in buffer_dicts]
+            stacked_buffers[key] = stack(tensors, dim=0)
+            
+    return stacked_params, stacked_buffers

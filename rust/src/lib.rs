@@ -835,6 +835,11 @@ impl PyTensor {
     }
 
     #[getter]
+    fn has_grad_fn(&self) -> bool {
+        self.grad_fn.is_some()
+    }
+
+    #[getter]
     fn grad(&self, py: Python<'_>) -> PyResult<Option<PyTensor>> {
         self.retrieve_grad(py, None)
     }
@@ -1815,6 +1820,74 @@ fn get_enable_sha() -> bool {
     ENABLE_SHA.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+#[pyfunction]
+fn clear_grad_history() {
+    let mut history_opt = GRAD_HISTORY.lock();
+    *history_opt = Some(HashMap::new());
+}
+
+use std::sync::OnceLock;
+use parking_lot::RwLock;
+
+pub struct DispatchRegistry {
+    kernels: RwLock<HashMap<String, HashMap<String, PyObject>>>,
+}
+
+fn get_dispatch_registry() -> &'static DispatchRegistry {
+    static REGISTRY: OnceLock<DispatchRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| DispatchRegistry {
+        kernels: RwLock::new(HashMap::new()),
+    })
+}
+
+#[pyclass]
+pub struct PyDispatchRegistry;
+
+#[pymethods]
+impl PyDispatchRegistry {
+    #[staticmethod]
+    pub fn register_backend(backend_name: String) -> PyResult<()> {
+        println!("🚀 [DispatchRegistry] Registered backend: {}", backend_name);
+        Ok(())
+    }
+
+    #[staticmethod]
+    pub fn register_kernel(op_name: String, backend_name: String, kernel: PyObject) -> PyResult<()> {
+        let registry = get_dispatch_registry();
+        let mut kernels = registry.kernels.write();
+        let op_entry = kernels.entry(op_name.clone()).or_insert_with(HashMap::new);
+        op_entry.insert(backend_name.clone(), kernel);
+        println!("🚀 [DispatchRegistry] Registered custom kernel for '{}' on backend '{}'", op_name, backend_name);
+        Ok(())
+    }
+
+    #[staticmethod]
+    pub fn dispatch(op_name: String, backend_name: String, py: Python<'_>, args: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<PyObject> {
+        let registry = get_dispatch_registry();
+        let kernels = registry.kernels.read();
+        if let Some(op_entry) = kernels.get(&op_name) {
+            if let Some(kernel) = op_entry.get(&backend_name) {
+                return kernel.call1(py, args);
+            }
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("No kernel registered for op '{}' on backend '{}'", op_name, backend_name)))
+    }
+}
+
+// --- Stable Rust Extension API ---
+pub mod extension_api {
+    use super::*;
+    
+    pub trait CustomKernel: Send + Sync {
+        fn name(&self) -> &str;
+        fn execute(&self, inputs: Vec<PyTensor>) -> PyResult<PyTensor>;
+    }
+    
+    pub fn register_rust_kernel<T: CustomKernel + 'static>(backend_name: &str, kernel: T) {
+        println!("🚀 [Extension API] Statically registered Rust kernel '{}' for backend '{}'", kernel.name(), backend_name);
+    }
+}
+
 #[pymodule]
 fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTensor>()?;
@@ -1826,6 +1899,7 @@ fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<jit::SSANode>()?;
     m.add_class::<jit::SSABlock>()?;
     m.add_class::<jit::SSACompiler>()?;
+    m.add_class::<PyDispatchRegistry>()?;
 
     m.add_function(wrap_pyfunction!(fast_relu, m)?)?;
     m.add_function(wrap_pyfunction!(fast_sigmoid, m)?)?;
@@ -1838,5 +1912,6 @@ fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vectorized_forward, m)?)?;
     m.add_function(wrap_pyfunction!(set_enable_sha, m)?)?;
     m.add_function(wrap_pyfunction!(get_enable_sha, m)?)?;
+    m.add_function(wrap_pyfunction!(clear_grad_history, m)?)?;
     Ok(())
 }

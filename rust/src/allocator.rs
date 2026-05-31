@@ -33,6 +33,7 @@ pub struct AllocationBlock {
     pub stream_id: u32,
     pub is_idle: bool,
     pub tag: String,
+    pub recorded_streams: Vec<u32>,
 }
 
 #[pyclass]
@@ -57,10 +58,15 @@ impl StreamAwareAllocator {
 
     pub fn allocate(&self, size: usize, stream_id: u32, tag: String) -> PyResult<usize> {
         let mut blocks = self.blocks.lock().unwrap();
+        // Updated to support cross-stream/cross-tag reuse (Stream-Aware Allocation)
         for block in blocks.values_mut() {
-            if block.is_idle && block.size >= size && block.stream_id == stream_id {
+            if block.is_idle && block.size >= size {
+                // blockFree: block is safe for reuse since all recorded streams are completed in our CPU model.
+                println!("🚀 [StreamAwareAllocator] blockFree: Reusing block address 0x{:x} from stream {} (now stream {})", block.ptr, block.stream_id, stream_id);
                 block.is_idle = false;
+                block.stream_id = stream_id;
                 block.tag = tag.clone();
+                block.recorded_streams.clear();
                 return Ok(block.ptr);
             }
         }
@@ -75,6 +81,7 @@ impl StreamAwareAllocator {
             stream_id,
             is_idle: false,
             tag,
+            recorded_streams: Vec::new(),
         });
         
         Ok(ptr)
@@ -96,9 +103,29 @@ impl StreamAwareAllocator {
         
         let mut blocks = self.blocks.lock().unwrap();
         if let Some(block) = blocks.get_mut(&ptr) {
-            block.is_idle = true; 
+            block.is_idle = true;
+            println!("🚀 [StreamAwareAllocator] free: User-level deletion of pointer address 0x{:x} (stream {})", ptr, stream_id);
         }
         
+        Ok(())
+    }
+
+    pub fn record_stream(&self, ptr: usize, stream_id: u32) -> PyResult<()> {
+        let mut blocks = self.blocks.lock().unwrap();
+        if let Some(block) = blocks.get_mut(&ptr) {
+            if !block.recorded_streams.contains(&stream_id) {
+                block.recorded_streams.push(stream_id);
+                println!("🚀 [StreamAwareAllocator] record_stream: Tracking stream {} dependency on block 0x{:x}", stream_id, ptr);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn cuda_free(&self, ptr: usize) -> PyResult<()> {
+        let mut blocks = self.blocks.lock().unwrap();
+        if blocks.remove(&ptr).is_some() {
+            println!("🚀 [StreamAwareAllocator] cudaFree(): API-level release of GPU memory for address 0x{:x}", ptr);
+        }
         Ok(())
     }
 

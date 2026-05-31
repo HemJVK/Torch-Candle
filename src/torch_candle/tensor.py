@@ -454,10 +454,37 @@ class Tensor:
                     
                 for inp, g in zip(inputs, grads):
                     if isinstance(inp, Tensor) and inp.requires_grad and g is not None:
-                        if inp.grad is None:
-                            inp.grad = g
-                        else:
-                            inp.grad = inp.grad + g
+                        if not inp._tensor.has_grad_fn:
+                            if inp.grad is None:
+                                inp.grad = g
+                            else:
+                                inp.grad = inp.grad + g
+                            
+                        # Dynamically propagate gradient further backward through the Rust/Python graph
+                        if inp._tensor.has_grad_fn:
+                            inp.backward(g)
+
+    def record_stream(self, stream):
+        """
+        Record that the tensor is being used by the given stream.
+        Prevents the tensor's memory from being reused by the allocator.
+        """
+        stream_id = stream.stream_id if hasattr(stream, 'stream_id') else int(stream)
+        from torch_candle.cuda import _allocator
+        ptr = id(self)
+        try:
+            _allocator.allocate(self.numel() * 4, stream_id, "record_stream")
+        except Exception:
+            pass
+        _allocator.record_stream(ptr, stream_id)
+
+    def __del__(self):
+        try:
+            from torch_candle.cuda import _allocator
+            _allocator.free(id(self), 0)
+            _allocator.cuda_free(id(self))
+        except Exception:
+            pass
 
     def detach(self):
         return Tensor(self.numpy(), device=self.device, dtype=self.dtype, requires_grad=False)

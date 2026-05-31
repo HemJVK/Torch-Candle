@@ -72,3 +72,9 @@ def is_initialized():
 def get_arch_list():
     """Returns list of CUDA architectures (stub)."""
     return []
+
+class Stream:
+    def __init__(self, stream_id=0):
+        self.stream_id = stream_id
+
+_allocator = _kernels.StreamAwareAllocator()

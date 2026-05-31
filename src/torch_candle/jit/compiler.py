@@ -6,6 +6,7 @@ class ScriptModule:
     def __init__(self, obj):
         self._obj = obj
         self._is_compiled = True
+        self.recorded_shapes = None
         
         # Instantiate SSACompiler natively in Rust
         self.compiler = _kernels.SSACompiler()
@@ -24,7 +25,13 @@ class ScriptModule:
         self.compiler.compile_and_optimize()
         
     def __call__(self, *args, **kwargs):
-        # Hot-path: bypass standard Python checks and run at native speed
+        current_shapes = [tuple(a.shape) if hasattr(a, "shape") else None for a in args]
+        if self.recorded_shapes is None:
+            self.recorded_shapes = current_shapes
+        elif current_shapes != self.recorded_shapes:
+            print(f"⚠️ [JIT Tracing] Dynamic shape detected in ScriptModule (expected {self.recorded_shapes}, got {current_shapes}). Falling back to eager mode.")
+            return self._obj(*args, **kwargs)
+            
         return self._obj(*args, **kwargs)
         
     def save(self, filepath):

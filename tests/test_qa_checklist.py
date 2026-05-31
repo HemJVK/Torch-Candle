@@ -56,6 +56,7 @@ def test_sha_numerical_stability():
     torch.Tensor.enable_sha = True
     if hasattr(torch.Tensor, "_grad_history"):
         torch.Tensor._grad_history.clear()
+    torch.clear_grad_history()
 
     w_sha = torch.Tensor([5.0], requires_grad=True)
     # Step 1: establish a healthy gradient history

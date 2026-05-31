@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use pyo3::prelude::*;
+use std::sync::Arc;
+use parking_lot::Mutex;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -29,6 +31,7 @@ impl Default for TaskMetadata {
     }
 }
 
+// 128-byte cache alignment to prevent false sharing and MESI invalidations
 #[repr(align(128))]
 pub struct CacheAlignedAtomicUsize {
     pub val: AtomicUsize,
@@ -45,10 +48,21 @@ pub struct SPSCRingBufferLayout {
 pub struct SPSCRingBuffer {
     raw_ptr: *mut SPSCRingBufferLayout,
     is_owner: bool,
+    reader_thread: Arc<Mutex<Option<std::thread::Thread>>>,
 }
 
 unsafe impl Send for SPSCRingBuffer {}
 unsafe impl Sync for SPSCRingBuffer {}
+
+impl Clone for SPSCRingBuffer {
+    fn clone(&self) -> Self {
+        Self {
+            raw_ptr: self.raw_ptr,
+            is_owner: false,
+            reader_thread: self.reader_thread.clone(),
+        }
+    }
+}
 
 #[pymethods]
 impl SPSCRingBuffer {
@@ -60,7 +74,11 @@ impl SPSCRingBuffer {
             buffer: [TaskMetadata::default(); 1024],
         });
         let raw_ptr = Box::into_raw(layout);
-        Self { raw_ptr, is_owner: true }
+        Self {
+            raw_ptr,
+            is_owner: true,
+            reader_thread: Arc::new(Mutex::new(None)),
+        }
     }
 
     pub fn push(&self, op_code: u32, device_id: u32, payload_bytes: Vec<u8>) -> PyResult<()> {
@@ -86,6 +104,12 @@ impl SPSCRingBuffer {
         };
         
         layout.head.val.store(head.wrapping_add(1), Ordering::Release);
+        
+        // Unpark reader thread if it was parked (Hybrid Wait Strategy Integration)
+        if let Some(thread) = self.reader_thread.lock().take() {
+            thread.unpark();
+        }
+        
         Ok(())
     }
 
@@ -105,29 +129,45 @@ impl SPSCRingBuffer {
         Ok(Some(task))
     }
 
-    pub fn wait_and_pop(&self) -> PyResult<TaskMetadata> {
+    pub fn wait_and_pop(&self, py: Python<'_>) -> PyResult<TaskMetadata> {
         let layout = unsafe { &mut *self.raw_ptr };
         let start = std::time::Instant::now();
         let tail = layout.tail.val.load(Ordering::Relaxed);
         
-        loop {
-            let head = layout.head.val.load(Ordering::Acquire);
-            if tail != head {
-                let index = tail % 1024;
-                let task = layout.buffer[index];
-                layout.tail.val.store(tail.wrapping_add(1), Ordering::Release);
-                return Ok(task);
+        py.allow_threads(|| {
+            loop {
+                let head = layout.head.val.load(Ordering::Acquire);
+                if tail != head {
+                    let index = tail % 1024;
+                    let task = layout.buffer[index];
+                    layout.tail.val.store(tail.wrapping_add(1), Ordering::Release);
+                    return Ok(task);
+                }
+                
+                let elapsed = start.elapsed();
+                if elapsed.as_micros() < 50 {
+                    // 1. Busy spinning (< 50µs)
+                    std::hint::spin_loop();
+                } else if elapsed.as_micros() < 500 {
+                    // 2. Yielding (< 500µs)
+                    std::thread::yield_now();
+                } else {
+                    // 3. Thread parking/Futex sleep to prevent burning CPU
+                    {
+                        let mut guard = self.reader_thread.lock();
+                        *guard = Some(std::thread::current());
+                    }
+                    
+                    // Double check before parking to avoid race condition
+                    let head_check = layout.head.val.load(Ordering::Acquire);
+                    if tail != head_check {
+                        continue;
+                    }
+                    
+                    std::thread::park_timeout(std::time::Duration::from_millis(10));
+                }
             }
-            
-            let elapsed = start.elapsed();
-            if elapsed.as_micros() < 50 {
-                std::hint::spin_loop();
-            } else if elapsed.as_micros() < 500 {
-                std::thread::yield_now();
-            } else {
-                std::thread::sleep(std::time::Duration::from_micros(100));
-            }
-        }
+        })
     }
 }
 
