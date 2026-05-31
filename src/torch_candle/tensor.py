@@ -18,6 +18,7 @@ class Tensor:
 
     _grad_enabled = True  # toggled by torch.no_grad()
     enable_sha = True
+    _grad_history = {}
 
     def __hash__(self):
         return id(self._tensor)
@@ -594,3 +595,10 @@ class Tensor:
 
     def is_shared(self):
         return self._shm is not None
+
+    def __torch_dispatch__(self, func_name, *args, **kwargs):
+        """
+        Base subclass interception layer. Routes back to standard execution
+        if no subclass overrides it.
+        """
+        return getattr(self, func_name)(*args, **kwargs)

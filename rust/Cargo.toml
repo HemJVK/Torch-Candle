@@ -16,6 +16,7 @@ cfg-if = "1.0.0"
 candle-core = { git = "https://github.com/huggingface/candle.git", package = "candle-core" }
 candle-nn = { git = "https://github.com/huggingface/candle.git", package = "candle-nn" }
 parking_lot = "0.12.3"
+serde_json = "1.0"
 
 [features]
 default = []

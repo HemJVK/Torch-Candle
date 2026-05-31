@@ -307,3 +307,52 @@ def stack_module_state(models):
             stacked_buffers[key] = stack(tensors, dim=0)
             
     return stacked_params, stacked_buffers
+
+def subclass_dispatch(func):
+    """
+    Decorator that intercepts function calls and delegates to __torch_dispatch__
+    if any of the input tensors are custom subclasses with __torch_dispatch__.
+    """
+    from functools import wraps
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        from torch_candle import Tensor
+        all_args = list(args) + list(kwargs.values())
+        for arg in all_args:
+            if isinstance(arg, Tensor) and type(arg) is not Tensor:
+                if hasattr(arg, "__torch_dispatch__"):
+                    return arg.__torch_dispatch__(func.__name__, *args, **kwargs)
+        return func(*args, **kwargs)
+    return wrapper
+
+from torch_candle import Tensor
+
+class AttnBiasTensor(Tensor):
+    """
+    Custom tensor subclass representing attention bias masks (e.g. block-diagonal, causal).
+    Enables dynamic, stateless functional transformation dispatching and custom mask routing.
+    """
+    def __init__(self, data, mask_type="block_diagonal", **kwargs):
+        super().__init__(data, **kwargs)
+        self.mask_type = mask_type
+
+    def __torch_dispatch__(self, func_name, *args, **kwargs):
+        if func_name == "scaled_dot_product_attention":
+            print(f"🚀 [Subclass Dispatcher] Routing SDPA through AttnBiasTensor ({self.mask_type})")
+            return self.optimized_sdpa(*args, **kwargs)
+        return super().__torch_dispatch__(func_name, *args, **kwargs)
+
+    def optimized_sdpa(self, query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False):
+        d_k = key.shape[-1]
+        scale = 1.0 / (d_k ** 0.5)
+        k_t = key.transpose(-2, -1).contiguous()
+        scores = query.matmul(k_t) * scale
+        
+        # Apply the attention bias mask represented by self
+        scores = scores + self
+        
+        from torch_candle.nn.functional import softmax, dropout
+        attn_weights = softmax(scores, dim=-1)
+        if dropout_p > 0.0:
+            attn_weights = dropout(attn_weights, p=dropout_p, training=True)
+        return attn_weights.matmul(value)

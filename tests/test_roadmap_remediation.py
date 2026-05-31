@@ -254,12 +254,7 @@ def test_proactive_block_reclaim():
     alloc.free(ptr, 0)
     alloc.cuda_free(ptr)
 
-def test_hard_error_regression():
-    import torch_candle as torch
-    torch.set_disable_ema_estimates(True)
-    assert torch.get_disable_ema_estimates() == True
-    torch.set_disable_ema_estimates(False)
-    assert torch.get_disable_ema_estimates() == False
+
 
 def test_zero_tool_call_guard():
     import torch_candle as torch

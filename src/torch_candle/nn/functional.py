@@ -14,6 +14,7 @@ import torch_candle_backend as _kernels
 
 from ..tensor import Tensor
 from .. import ops
+from ..func import subclass_dispatch
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -536,6 +537,7 @@ def pairwise_distance(input1, input2, p=2.0, eps=1e-6, keepdim=False):
 
 # ─── ATTENTION ───────────────────────────────────────────────────────────────
 
+@subclass_dispatch
 def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False):
     """SDPA — pure candle matmul + softmax + masking."""
     d_k    = query.shape[-1]
@@ -660,6 +662,7 @@ def dropout(input, p=0.5, training=True, inplace=False):
     return input * keep_mask
 
 
+@subclass_dispatch
 def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False):
     """
     Scaled Dot-Product Attention (SDPA).

@@ -65,7 +65,6 @@ mod jit;
 
 static ENABLE_SHA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static GRAD_HISTORY: Mutex<Option<HashMap<usize, Vec<f32>>>> = Mutex::new(None);
-static DISABLE_EMA_ESTIMATES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 thread_local! {
     static KERNEL_CALL_COUNT: std::cell::Cell<usize> = std::cell::Cell::new(0);
@@ -76,14 +75,47 @@ fn get_python_grad_history(py: Python<'_>, param_id: usize) -> Option<(Vec<usize
         if let Ok(tensor_cls) = tensor_mod.getattr("Tensor") {
             if let Ok(grad_history) = tensor_cls.getattr("_grad_history") {
                 if let Ok(item) = grad_history.get_item(param_id) {
+                    // 1. Try PyTuple (shape, data)
                     if let Ok(tuple) = item.downcast::<pyo3::types::PyTuple>() {
-                        let shape_val: Vec<usize> = tuple.get_item(0).unwrap().extract().unwrap_or_default();
-                        let data_val = tuple.get_item(1).unwrap();
-                        if let Ok(arr) = data_val.extract::<Vec<f32>>() {
-                            return Some((shape_val, arr));
-                        } else if let Ok(arr) = data_val.call_method0("tolist") {
-                            if let Ok(vec) = arr.extract::<Vec<f32>>() {
-                                return Some((shape_val, vec));
+                        if tuple.len() >= 2 {
+                            let shape_val: Vec<usize> = tuple.get_item(0).unwrap().extract().unwrap_or_default();
+                            let data_val = tuple.get_item(1).unwrap();
+                            if let Ok(arr) = data_val.extract::<Vec<f32>>() {
+                                return Some((shape_val, arr));
+                            } else if let Ok(arr) = data_val.call_method0("tolist") {
+                                if let Ok(vec) = arr.extract::<Vec<f32>>() {
+                                    return Some((shape_val, vec));
+                                }
+                            }
+                        }
+                    }
+                    // 2. Try PyDict (Heterogeneous dict metadata)
+                    if let Ok(dict) = item.downcast::<pyo3::types::PyDict>() {
+                        let shape_opt = dict.get_item("shape").ok().flatten().and_then(|x| x.extract::<Vec<usize>>().ok());
+                        let data_opt = dict.get_item("data").ok().flatten();
+                        if let (Some(shape_val), Some(data_val)) = (shape_opt, data_opt) {
+                            if let Ok(arr) = data_val.extract::<Vec<f32>>() {
+                                return Some((shape_val, arr));
+                            } else if let Ok(arr) = data_val.call_method0("tolist") {
+                                if let Ok(vec) = arr.extract::<Vec<f32>>() {
+                                    return Some((shape_val, vec));
+                                }
+                            }
+                        }
+                    }
+                    // 3. Try PyString (Heterogeneous JSON)
+                    if let Ok(s) = item.extract::<String>() {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                            let shape_val: Vec<usize> = v.get("shape")
+                                .and_then(|x| x.as_array())
+                                .map(|arr| arr.iter().filter_map(|x| x.as_u64().map(|y| y as usize)).collect())
+                                .unwrap_or_default();
+                            let data_val: Vec<f32> = v.get("data")
+                                .and_then(|x| x.as_array())
+                                .map(|arr| arr.iter().filter_map(|x| x.as_f64().map(|y| y as f32)).collect())
+                                .unwrap_or_default();
+                            if !data_val.is_empty() {
+                                return Some((shape_val, data_val));
                             }
                         }
                     }
@@ -983,8 +1015,7 @@ impl PyTensor {
             if let Some(ref g) = *g_opt {
                 let mut res_g = g.clone();
                 let sha_enabled = ENABLE_SHA.load(std::sync::atomic::Ordering::Relaxed)
-                    && get_python_enable_sha(py)
-                    && !DISABLE_EMA_ESTIMATES.load(std::sync::atomic::Ordering::Relaxed);
+                    && get_python_enable_sha(py);
                 
                 if self.requires_grad && sha_enabled {
                     let shape = res_g.dims().to_vec();
@@ -1969,15 +2000,7 @@ fn clear_grad_history() {
     *history_opt = Some(HashMap::new());
 }
 
-#[pyfunction]
-fn set_disable_ema_estimates(val: bool) {
-    DISABLE_EMA_ESTIMATES.store(val, std::sync::atomic::Ordering::Relaxed);
-}
 
-#[pyfunction]
-fn get_disable_ema_estimates() -> bool {
-    DISABLE_EMA_ESTIMATES.load(std::sync::atomic::Ordering::Relaxed)
-}
 
 #[pyfunction]
 fn increment_kernel_call_count() {
@@ -2131,8 +2154,6 @@ fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pop_dispatch_level, m)?)?;
     m.add_function(wrap_pyfunction!(get_active_dispatch_level, m)?)?;
     m.add_function(wrap_pyfunction!(jit::compile_ast, m)?)?;
-    m.add_function(wrap_pyfunction!(set_disable_ema_estimates, m)?)?;
-    m.add_function(wrap_pyfunction!(get_disable_ema_estimates, m)?)?;
     m.add_function(wrap_pyfunction!(increment_kernel_call_count, m)?)?;
     m.add_function(wrap_pyfunction!(get_kernel_call_count, m)?)?;
     m.add_function(wrap_pyfunction!(reset_kernel_call_count, m)?)?;

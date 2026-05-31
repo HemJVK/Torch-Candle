@@ -64,8 +64,11 @@ except ImportError: pass
 try: from . import multiprocessing
 except ImportError: pass
 
-try: from . import func
-except ImportError: pass
+try:
+    from . import func
+    from .func import subclass_dispatch, AttnBiasTensor
+except ImportError:
+    pass
 
 try: from . import jit
 except ImportError: pass
@@ -116,14 +119,7 @@ def clear_grad_history():
     """
     _kernels.clear_grad_history()
 
-def set_disable_ema_estimates(val: bool):
-    """
-    Enable or disable EMA-based stable gradient estimates (e.g. during tgold runs).
-    """
-    _kernels.set_disable_ema_estimates(val)
 
-def get_disable_ema_estimates() -> bool:
-    return _kernels.get_disable_ema_estimates()
 
 def get_kernel_call_count() -> int:
     return _kernels.get_kernel_call_count()

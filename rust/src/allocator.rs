@@ -123,19 +123,10 @@ impl StreamAwareAllocator {
 
     pub fn cuda_free(&self, ptr: usize) -> PyResult<()> {
         let mut blocks = self.blocks.lock().unwrap();
-        if blocks.remove(&ptr).is_some() {
-            println!("🚀 [StreamAwareAllocator] cudaFree(): API-level release of GPU memory for address 0x{:x}", ptr);
+        if let Some(block) = blocks.get_mut(&ptr) {
+            block.is_idle = true;
+            println!("🚀 [StreamAwareAllocator] cudaFree(): API-level logical release of block 0x{:x}", ptr);
         }
-        
-        // Proactive metadata reconciliation to avoid OOM latency spikes
-        blocks.retain(|_, block| {
-            if block.is_idle && block.recorded_streams.is_empty() {
-                println!("🚀 [StreamAwareAllocator] Proactive Reclaim: Freeing address 0x{:x} from heap", block.ptr);
-                false
-            } else {
-                true
-            }
-        });
         Ok(())
     }
 
