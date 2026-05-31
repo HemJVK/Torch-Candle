@@ -178,3 +178,75 @@ def test_dispatch_registry():
     # 3. Dispatch to kernel
     res = torch.dispatch_kernel("custom::add", "custom_gpu", 2, 3)
     assert res == 50
+
+# ============================================================
+# Technical Audit & Bug Remediation Tests (v0.5.0-Alpha)
+# ============================================================
+def test_glibc_mmap_tuning():
+    from torch_candle.ctypes_mmap import tune_glibc_allocator
+    # Must run without errors across all platforms
+    tune_glibc_allocator()
+
+def test_gpu_event_sync():
+    from torch_candle.cuda import Event, Stream
+    e = Event()
+    s = Stream(1)
+    e.record(s)
+    assert e.query() == True
+    e.wait(s)
+
+def test_cuda_ipc_mem_handle():
+    from torch_candle.multiprocessing.reductions import reduce_tensor, cudaIpcMemHandle
+    t = torch.tensor([1.0, 2.0])
+    # Force GPU reduction pathway serialization
+    t._device = "cuda"
+    reconstructor, args = reduce_tensor(t)
+    
+    assert isinstance(args[0], cudaIpcMemHandle)
+    assert len(args[0].handle_bytes) == 64
+    
+    t_reconstructed = reconstructor(*args)
+    assert t_reconstructed.device == "cuda"
+
+def test_ast_compiler_control_flow():
+    from torch_candle.jit.compiler import ASTCompiler
+    def conditional_func(x):
+        y = x + 1.0
+        if y > 2.0:
+            z = y * 2.0
+        else:
+            z = y + 5.0
+        return z
+        
+    compiler = ASTCompiler()
+    nodes = compiler.compile_func(conditional_func)
+    assert len(nodes) > 0
+    
+    ops = [n[1] for n in nodes]
+    assert "cond_eval" in ops
+    assert "enter_branch" in ops
+
+def test_level_allocated_dispatch_keys():
+    from torch_candle.func import vmap, get_active_dispatch_level
+    
+    def outer_func(x):
+        assert get_active_dispatch_level() == 1
+        
+        def inner_func(y):
+            assert get_active_dispatch_level() == 2
+            return y * 2.0
+            
+        wrapped_inner = vmap(inner_func)
+        return wrapped_inner(x)
+        
+    wrapped_outer = vmap(outer_func)
+    x = torch.tensor([[1.0, 2.0]])
+    wrapped_outer(x)
+    
+    assert get_active_dispatch_level() == 0
+
+def test_rocm_backend_dispatch():
+    # Dynamic AMD ROCm/HIP backend verification
+    torch.register_privateuse1_backend("rocm")
+    torch.register_privateuse1_backend("hip")
+

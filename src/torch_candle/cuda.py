@@ -77,4 +77,24 @@ class Stream:
     def __init__(self, stream_id=0):
         self.stream_id = stream_id
 
+class Event:
+    def __init__(self, enable_timing=False, blocking=False, interprocess=False):
+        self.stream_id = None
+        self._event = None
+
+    def record(self, stream=None):
+        stream_id = stream.stream_id if stream else 0
+        self.stream_id = stream_id
+        self._event = _allocator.record_event(stream_id)
+
+    def wait(self, stream=None):
+        comm_stream_id = stream.stream_id if stream else 0
+        if self._event is not None:
+            _allocator.wait_event(comm_stream_id, self._event)
+
+    def query(self) -> bool:
+        if self._event is not None:
+            return self._event.query()
+        return True
+
 _allocator = _kernels.StreamAwareAllocator()

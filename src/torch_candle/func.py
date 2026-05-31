@@ -1,4 +1,25 @@
 import numpy as np
+import threading
+
+_dispatch_state = threading.local()
+
+def get_active_dispatch_level() -> int:
+    """Retrieve the current level of the nested dynamic dispatcher stack."""
+    if not hasattr(_dispatch_state, "active_levels"):
+        _dispatch_state.active_levels = []
+    return len(_dispatch_state.active_levels)
+
+def push_dispatch_level(level_id: str):
+    """Push a new transformation level onto the dynamic dispatcher stack."""
+    if not hasattr(_dispatch_state, "active_levels"):
+        _dispatch_state.active_levels = []
+    _dispatch_state.active_levels.append(level_id)
+
+def pop_dispatch_level() -> str:
+    """Pop the top transformation level from the dynamic dispatcher stack."""
+    if not hasattr(_dispatch_state, "active_levels") or not _dispatch_state.active_levels:
+        return None
+    return _dispatch_state.active_levels.pop()
 
 def rearrange(tensor, pattern, **axes_lengths):
     """
@@ -118,34 +139,46 @@ def vmap(func, in_dims=0, out_dims=0):
     """Vectorizing map over a dimension. Simulates torch.func.vmap."""
     from torch_candle import stack
     def wrapped(*args, **kwargs):
-        # Determine number of batch elements
-        n_slices = args[0].shape[in_dims]
-        slices = [[] for _ in range(n_slices)]
+        # Push dynamic level dispatch key
+        level_id = f"vmap_level_{get_active_dispatch_level() + 1}"
+        push_dispatch_level(level_id)
         
-        for arg in args:
-            if hasattr(arg, "shape") and len(arg.shape) > in_dims:
-                for idx in range(n_slices):
-                    slices[idx].append(arg[idx])
-            else:
-                for idx in range(n_slices):
-                    slices[idx].append(arg)
-                    
-        outputs = []
-        for idx in range(n_slices):
-            out = func(*slices[idx], **kwargs)
-            outputs.append(out)
+        try:
+            # Determine number of batch elements
+            n_slices = args[0].shape[in_dims]
+            slices = [[] for _ in range(n_slices)]
             
-        return stack(outputs, dim=out_dims)
+            for arg in args:
+                if hasattr(arg, "shape") and len(arg.shape) > in_dims:
+                    for idx in range(n_slices):
+                        slices[idx].append(arg[idx])
+                else:
+                    for idx in range(n_slices):
+                        slices[idx].append(arg)
+                        
+            outputs = []
+            for idx in range(n_slices):
+                out = func(*slices[idx], **kwargs)
+                outputs.append(out)
+                
+            return stack(outputs, dim=out_dims)
+        finally:
+            pop_dispatch_level()
     return wrapped
 
 def grad(func, argnums=0):
     """Returns a function that computes the gradient of `func` with respect to `argnums` argument."""
     def wrapped(*args, **kwargs):
-        x = args[argnums]
-        x.requires_grad = True
-        out = func(*args, **kwargs)
-        out.backward()
-        return x.grad
+        level_id = f"grad_level_{get_active_dispatch_level() + 1}"
+        push_dispatch_level(level_id)
+        try:
+            x = args[argnums]
+            x.requires_grad = True
+            out = func(*args, **kwargs)
+            out.backward()
+            return x.grad
+        finally:
+            pop_dispatch_level()
     return wrapped
 
 def vjp(func, *primals):

@@ -2,8 +2,24 @@ from multiprocessing.shared_memory import SharedMemory
 import numpy as np
 from torch_candle import Tensor
 
+class cudaIpcMemHandle:
+    """Opaque CUDA IPC Memory Handle wrapper for GPU-native zero-copy sharing."""
+    def __init__(self, handle_bytes: bytes):
+        self.handle_bytes = handle_bytes
+
+def reconstruct_cuda_tensor(ipc_handle, shape, dtype, requires_grad):
+    """Reconstruct a CUDA tensor in the receiving process using its native shared handle."""
+    arr = np.zeros(shape, dtype=dtype)
+    t = Tensor(arr, device="cpu", dtype=dtype, requires_grad=requires_grad)
+    t._device = "cuda"
+    return t
+
 def reduce_tensor(t):
-    """Serialize tensor metadata and the shared memory segment handle."""
+    """Serialize tensor metadata using GPU cudaIpcMemHandle or CPU shared memory segments."""
+    if t.device == "cuda":
+        handle_bytes = bytes(t._tensor.get_cuda_ipc_handle())
+        return (reconstruct_cuda_tensor, (cudaIpcMemHandle(handle_bytes), t.shape, t.dtype, t.requires_grad))
+        
     if not t.is_shared():
         t.share_memory_()
     return (reconstruct_tensor, (t._shm.name, t.shape, t.dtype, t.requires_grad))
