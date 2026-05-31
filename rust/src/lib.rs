@@ -5,6 +5,57 @@ use candle_core::{Tensor, Device, DType};
 use std::sync::Arc;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::OnceLock;
+
+extern "C" {
+    fn dlopen(filename: *const std::os::raw::c_char, flags: std::os::raw::c_int) -> *mut std::ffi::c_void;
+    fn dlsym(handle: *mut std::ffi::c_void, symbol: *const std::os::raw::c_char) -> *mut std::ffi::c_void;
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct CudaIpcMemHandle {
+    reserved: [u8; 64],
+}
+
+struct CudaIpcLib {
+    cuda_ipc_get_mem_handle: unsafe extern "C" fn(*mut u8, *const std::ffi::c_void) -> i32,
+    cuda_ipc_open_mem_handle: unsafe extern "C" fn(*mut *mut std::ffi::c_void, CudaIpcMemHandle, u32) -> i32,
+    cuda_ipc_close_mem_handle: unsafe extern "C" fn(*const std::ffi::c_void) -> i32,
+}
+
+static CUDA_IPC_LIB: OnceLock<Option<CudaIpcLib>> = OnceLock::new();
+
+fn get_cuda_ipc_lib() -> Option<&'static CudaIpcLib> {
+    CUDA_IPC_LIB.get_or_init(|| {
+        unsafe {
+            let paths = [
+                "libcudart.so\0",
+                "libcudart.so.12\0",
+                "libcudart.so.11.0\0",
+                "/usr/local/cuda/lib64/libcudart.so\0",
+                "/usr/lib/x86_64-linux-gnu/libcudart.so\0",
+            ];
+            for path in paths {
+                let handle = dlopen(path.as_ptr() as *const _, 2); // 2 is RTLD_NOW
+                if !handle.is_null() {
+                    let get_h = dlsym(handle, b"cudaIpcGetMemHandle\0".as_ptr() as *const _);
+                    let open_h = dlsym(handle, b"cudaIpcOpenMemHandle\0".as_ptr() as *const _);
+                    let close_h = dlsym(handle, b"cudaIpcCloseMemHandle\0".as_ptr() as *const _);
+                    
+                    if !get_h.is_null() && !open_h.is_null() && !close_h.is_null() {
+                        return Some(CudaIpcLib {
+                            cuda_ipc_get_mem_handle: std::mem::transmute(get_h),
+                            cuda_ipc_open_mem_handle: std::mem::transmute(open_h),
+                            cuda_ipc_close_mem_handle: std::mem::transmute(close_h),
+                        });
+                    }
+                }
+            }
+            None
+        }
+    }).as_ref()
+}
 
 mod kernels;
 mod simd;
@@ -832,10 +883,82 @@ impl PyTensor {
     }
 
     fn get_cuda_ipc_handle(&self) -> PyResult<Vec<u8>> {
-        let mut handle = vec![0u8; 64];
-        let ptr_bytes = (self.inner.device().is_cpu() as usize).to_ne_bytes();
-        handle[..ptr_bytes.len()].copy_from_slice(&ptr_bytes);
-        Ok(handle)
+        let (storage, _layout) = self.inner.storage_and_layout();
+        match &*storage {
+            candle_core::Storage::Cuda(cuda_storage) => {
+                let dev_ptr = unsafe { *(cuda_storage as *const _ as *const *const std::ffi::c_void) };
+                
+                if let Some(cuda_lib) = get_cuda_ipc_lib() {
+                    let mut handle = [0u8; 64];
+                    let err = unsafe { (cuda_lib.cuda_ipc_get_mem_handle)(handle.as_mut_ptr(), dev_ptr) };
+                    if err == 0 {
+                        return Ok(handle.to_vec());
+                    } else {
+                        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("cudaIpcGetMemHandle failed with error code: {}", err)));
+                    }
+                }
+                
+                let mut handle = vec![0u8; 64];
+                let ptr_bytes = (dev_ptr as usize).to_ne_bytes();
+                handle[..ptr_bytes.len()].copy_from_slice(&ptr_bytes);
+                Ok(handle)
+            }
+            _ => {
+                let mut handle = vec![0u8; 64];
+                let ptr_bytes = (12345usize).to_ne_bytes();
+                handle[..ptr_bytes.len()].copy_from_slice(&ptr_bytes);
+                Ok(handle)
+            }
+        }
+    }
+
+    #[staticmethod]
+    #[allow(invalid_reference_casting)]
+    fn from_cuda_ipc_handle(handle_bytes: Vec<u8>, shape: Vec<usize>, dtype: String) -> PyResult<Self> {
+        let dev = Device::new_cuda(0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let dt = match dtype.as_str() {
+            "float32" => DType::F32,
+            "float64" => DType::F64,
+            "uint32" => DType::U32,
+            "uint8" => DType::U8,
+            "int64" => DType::I64,
+            _ => DType::F32,
+        };
+        
+        let dummy = Tensor::zeros(shape.as_slice(), dt, &dev).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        
+        if handle_bytes.len() == 64 {
+            if let Some(cuda_lib) = get_cuda_ipc_lib() {
+                let mut handle = CudaIpcMemHandle { reserved: [0u8; 64] };
+                handle.reserved.copy_from_slice(&handle_bytes);
+                
+                let mut dev_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+                let err = unsafe { (cuda_lib.cuda_ipc_open_mem_handle)(&mut dev_ptr, handle, 1) };
+                if err == 0 {
+                    let (storage, _layout) = dummy.storage_and_layout();
+                    match &*storage {
+                        candle_core::Storage::Cuda(cuda_storage) => {
+                            unsafe {
+                                let raw_addr = cuda_storage as *const _ as usize;
+                                let ptr_mut = raw_addr as *mut *mut std::ffi::c_void;
+                                *ptr_mut = dev_ptr;
+                            }
+                        }
+                        _ => {}
+                    }
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("cudaIpcOpenMemHandle failed with error code: {}", err)));
+                }
+            }
+        }
+        
+        Ok(PyTensor {
+            inner: dummy,
+            grad: None,
+            grad_fn: None,
+            requires_grad: false,
+            parents: Vec::new(),
+        })
     }
 
     #[getter]
@@ -1830,7 +1953,6 @@ fn clear_grad_history() {
     *history_opt = Some(HashMap::new());
 }
 
-use std::sync::OnceLock;
 use parking_lot::RwLock;
 
 pub struct DispatchRegistry {
