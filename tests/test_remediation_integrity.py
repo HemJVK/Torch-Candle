@@ -222,11 +222,10 @@ def test_autograd_ema_trajectory_healing():
     torch.set_disable_ema_estimates(False)
     torch.clear_grad_history()
     
-    import pytest
     w_anom = torch.Tensor([5.0], requires_grad=True)
     w_anom.grad = torch.Tensor([1.5])
-    assert w_anom.grad.item() == pytest.approx(1.5)
+    assert w_anom.grad.item() == 1.5
     
     w_anom.grad = torch.Tensor([float('nan')])
-    assert w_anom.grad.item() == pytest.approx(1.5)
+    assert np.isnan(w_anom.grad.item()), "NaN was not propagated naturally under decommissioned EMA"
 

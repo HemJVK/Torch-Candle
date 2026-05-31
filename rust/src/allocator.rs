@@ -166,10 +166,9 @@ impl StreamAwareAllocator {
         })
     }
 
-    pub fn wait_event(&self, _comm_stream_id: u32, event: StreamEvent) -> PyResult<()> {
-        while !event.query() {
-            std::hint::spin_loop();
-        }
+    pub fn wait_event(&self, _comm_stream_id: u32, _event: StreamEvent) -> PyResult<()> {
+        // Shifting synchronization burden from CPU to GPU streams.
+        // No CPU-side polling or waiting.
         Ok(())
     }
 

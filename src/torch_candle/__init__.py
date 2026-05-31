@@ -1,6 +1,7 @@
 import numpy as np
 import math
 
+from . import ctypes_mmap
 
 import torch_candle_backend as _kernels
 

@@ -14,6 +14,20 @@ class CtypesMmapOptimizer:
         Attempts to adjust the kernel's max_map_count threshold to prevent multi-process
         memory allocation overflows (OOM cannot allocate memory 12 errors).
         """
+        # Enforce strict glibc memory threshold: MALLOC_MMAP_THRESHOLD_ = 65536
+        os.environ["MALLOC_MMAP_THRESHOLD_"] = "65536"
+        try:
+            if platform.system() == "Linux":
+                try:
+                    libc = ctypes.CDLL("libc.so.6")
+                except Exception:
+                    libc = ctypes.CDLL(None)
+                # M_MMAP_THRESHOLD is 3
+                res = libc.mallopt(3, 65536)
+                print(f"🚀 [Memory Optimization] Enforced M_MMAP_THRESHOLD = 65536 via mallopt (status: {res})")
+        except Exception as e:
+            print(f"⚠️ [Memory Optimization] Failed to set mallopt: {e}")
+
         if platform.system() != "Linux":
             return False
             
