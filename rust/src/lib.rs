@@ -2101,8 +2101,59 @@ impl VmapDispatcher {
     }
 }
 
+#[pyfunction]
+#[pyo3(signature = (func, args, kwargs=None))]
+fn subclass_dispatch(
+    py: Python<'_>,
+    func: PyObject,
+    args: &Bound<'_, pyo3::types::PyTuple>,
+    kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+) -> PyResult<PyObject> {
+    let torch_candle = py.import_bound("torch_candle")?;
+    let tensor_class = torch_candle.getattr("Tensor")?;
+
+    let mut has_subclass = false;
+    let mut subclass_arg = None;
+
+    for arg in args.iter() {
+        if arg.is_instance(&tensor_class)? && !arg.get_type().is(&tensor_class) {
+            has_subclass = true;
+            subclass_arg = Some(arg.clone());
+            break;
+        }
+    }
+
+    if !has_subclass {
+        if let Some(kw) = kwargs {
+            for (_, val) in kw.iter() {
+                if val.is_instance(&tensor_class)? && !val.get_type().is(&tensor_class) {
+                    has_subclass = true;
+                    subclass_arg = Some(val.clone());
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(sub_arg) = subclass_arg {
+        if sub_arg.hasattr("__torch_dispatch__")? {
+            let func_name = func.getattr(py, "__name__")?;
+            let mut dispatch_args = vec![func_name.into_py(py)];
+            for arg in args.iter() {
+                dispatch_args.push(arg.into_py(py));
+            }
+            let dispatch_args_tuple = pyo3::types::PyTuple::new_bound(py, dispatch_args);
+            let res = sub_arg.call_method1("__torch_dispatch__", dispatch_args_tuple)?;
+            return Ok(res.unbind());
+        }
+    }
+
+    func.call_bound(py, args.clone(), kwargs)
+}
+
 #[pymodule]
 fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(subclass_dispatch, m)?)?;
     std::env::set_var("MALLOC_MMAP_THRESHOLD_", "65536");
     unsafe {
         mallopt(3, 65536);

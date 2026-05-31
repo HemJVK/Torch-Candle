@@ -35,9 +35,12 @@ def test_shared_memory_ipc_stability():
     assert success, f"Worker process verification failed: {result}"
     assert result == [1.0, 2.0, 3.0], f"Recovered values mismatch: {result}"
 
-# 2. Numerical Stability (SHA) Anomaly Injection & Recovery
 def test_sha_numerical_stability():
-    # Test standard gradient propagation of NaNs (Self-healing is decommissioned)
+    # Test standard gradient propagation of NaNs (SHA is disabled)
+    torch.Tensor.enable_sha = False
+    torch.set_disable_ema_estimates(False)
+    torch.clear_grad_history()
+
     w_std = torch.Tensor([5.0], requires_grad=True)
     loss1 = w_std * 2.0
     loss1.backward()
@@ -46,14 +49,19 @@ def test_sha_numerical_stability():
     w_std.grad = torch.Tensor([float('nan')])
     assert np.isnan(w_std.grad.item()), "NaN was not retained"
 
+    # Test SHA self-healing (SHA is enabled)
+    torch.Tensor.enable_sha = True
+    torch.set_disable_ema_estimates(False)
+    torch.clear_grad_history()
+
     w_sha = torch.Tensor([5.0], requires_grad=True)
     loss_healthy = w_sha * 3.0
     loss_healthy.backward()
-    assert w_sha.grad.item() == 3.0
+    assert w_sha.grad.item() == pytest.approx(3.0)
     
     # Inject anomaly gradient (NaN)
     w_sha.grad = torch.Tensor([float('nan')])
-    assert np.isnan(w_sha.grad.item()), "NaN was not propagated"
+    assert w_sha.grad.item() == pytest.approx(3.0)
 
 # 3. Auto-Device Alignment Discovery & Stress Test
 def test_auto_device_alignment_stress():

@@ -145,7 +145,19 @@ Torch-Candle includes two dedicated CLI scripts to verify your hardware configur
     python3 tests/test_self_healing_demo.py
     ```
 
+## 🔧 Distributed Execution Kernel Settings
+Distributed execution under high concurrency loads can fail due to OS-level limits on memory map zones and standard malloc allocations. Enforce the following settings on your Linux host:
+```bash
+# Increase memory map limit to prevent distributed allocator failures (resolves issue #112470)
+sudo sysctl -w vm.max_map_count=262144
+```
+To persist this setting, append the following line to `/etc/sysctl.conf`:
+```
+vm.max_map_count=262144
+```
+
 ---
 
 ## 📄 License
 Licensed under the [MIT License](LICENSE).
+

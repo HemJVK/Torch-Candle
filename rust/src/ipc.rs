@@ -48,7 +48,8 @@ pub struct SPSCRingBufferLayout {
 pub struct SPSCRingBuffer {
     raw_ptr: *mut SPSCRingBufferLayout,
     is_owner: bool,
-    reader_thread: Arc<Mutex<Option<std::thread::Thread>>>,
+    condvar: Arc<std::sync::Condvar>,
+    condvar_mutex: Arc<std::sync::Mutex<()>>,
 }
 
 unsafe impl Send for SPSCRingBuffer {}
@@ -59,7 +60,8 @@ impl Clone for SPSCRingBuffer {
         Self {
             raw_ptr: self.raw_ptr,
             is_owner: false,
-            reader_thread: self.reader_thread.clone(),
+            condvar: self.condvar.clone(),
+            condvar_mutex: self.condvar_mutex.clone(),
         }
     }
 }
@@ -77,7 +79,8 @@ impl SPSCRingBuffer {
         Self {
             raw_ptr,
             is_owner: true,
-            reader_thread: Arc::new(Mutex::new(None)),
+            condvar: Arc::new(std::sync::Condvar::new()),
+            condvar_mutex: Arc::new(std::sync::Mutex::new(())),
         }
     }
 
@@ -105,10 +108,7 @@ impl SPSCRingBuffer {
         
         layout.head.val.store(head.wrapping_add(1), Ordering::Release);
         
-        // Unpark reader thread if it was parked (Hybrid Wait Strategy Integration)
-        if let Some(thread) = self.reader_thread.lock().take() {
-            thread.unpark();
-        }
+        self.condvar.notify_all();
         
         Ok(())
     }
@@ -131,43 +131,20 @@ impl SPSCRingBuffer {
 
     pub fn wait_and_pop(&self, py: Python<'_>) -> PyResult<TaskMetadata> {
         let layout = unsafe { &mut *self.raw_ptr };
-        let start = std::time::Instant::now();
         let tail = layout.tail.val.load(Ordering::Relaxed);
         
         py.allow_threads(|| {
-            loop {
-                let head = layout.head.val.load(Ordering::Acquire);
-                if tail != head {
-                    let index = tail % 1024;
-                    let task = layout.buffer[index];
-                    layout.tail.val.store(tail.wrapping_add(1), Ordering::Release);
-                    return Ok(task);
-                }
-                
-                let elapsed = start.elapsed();
-                if elapsed.as_micros() < 50 {
-                    // 1. Busy spinning (< 50µs)
-                    std::hint::spin_loop();
-                } else if elapsed.as_micros() < 500 {
-                    // 2. Yielding (< 500µs)
-                    std::thread::yield_now();
-                } else {
-                    // 3. Thread parking/Futex sleep to prevent burning CPU
-                    {
-                        let mut guard = self.reader_thread.lock();
-                        *guard = Some(std::thread::current());
-                    }
-                    
-                    // Double check before parking to avoid race condition
-                    let head_check = layout.head.val.load(Ordering::Acquire);
-                    if tail != head_check {
-                        continue;
-                    }
-                    
-                    std::thread::park_timeout(std::time::Duration::from_millis(10));
-                }
+            let mut guard = self.condvar_mutex.lock().unwrap();
+            while layout.head.val.load(Ordering::Acquire) == tail {
+                guard = self.condvar.wait(guard).unwrap();
             }
-        })
+            Ok::<(), PyErr>(())
+        })?;
+        
+        let index = tail % 1024;
+        let task = layout.buffer[index];
+        layout.tail.val.store(tail.wrapping_add(1), Ordering::Release);
+        Ok(task)
     }
 }
 

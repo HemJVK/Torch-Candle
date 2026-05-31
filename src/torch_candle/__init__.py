@@ -67,8 +67,8 @@ except ImportError: pass
 try:
     from . import func
     from .func import (
-        subclass_dispatch, AttnBiasTensor, jacrev, hessian,
-        DynamicSubclassDispatcher, make_functional, vmap, grad
+        subclass_dispatch, AttnBiasTensor, jacrev, jacfwd, hessian,
+        DynamicSubclassDispatcher, make_functional, make_functional_with_buffers, vmap, grad
     )
 except ImportError:
     pass
@@ -128,6 +128,7 @@ def clear_grad_history():
     Clear the running gradient histories used by Self-Healing Autograd.
     """
     _kernels.clear_grad_history()
+    Tensor._grad_history.clear()
 
 class HardValidationFailure(Exception):
     """

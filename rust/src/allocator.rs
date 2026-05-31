@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Mutex, Condvar};
 use pyo3::prelude::*;
 
 #[pyclass]
@@ -47,7 +47,8 @@ pub struct StreamAwareAllocator {
     pub stream_head: AtomicUsize,
     _pad: [u8; 128],
     pub stream_tail: AtomicUsize,
-    waiter_thread: Mutex<Option<std::thread::Thread>>,
+    condvar: Condvar,
+    condvar_mutex: Mutex<()>,
 }
 
 #[pymethods]
@@ -62,7 +63,8 @@ impl StreamAwareAllocator {
             stream_head: AtomicUsize::new(0),
             _pad: [0u8; 128],
             stream_tail: AtomicUsize::new(0),
-            waiter_thread: Mutex::new(None),
+            condvar: Condvar::new(),
+            condvar_mutex: Mutex::new(()),
         }
     }
 
@@ -173,14 +175,7 @@ impl StreamAwareAllocator {
 
     pub fn increment_stream_head(&self) -> PyResult<()> {
         self.stream_head.fetch_add(1, Ordering::Release);
-        
-        // Unpark waiter thread if it was parked (Hybrid Wait Strategy Integration)
-        if let Ok(mut guard) = self.waiter_thread.lock() {
-            if let Some(thread) = guard.take() {
-                thread.unpark();
-            }
-        }
-        
+        self.condvar.notify_all();
         Ok(())
     }
 
@@ -194,34 +189,9 @@ impl StreamAwareAllocator {
     }
 
     pub fn wait_for_stream_completion(&self, target: usize) -> PyResult<()> {
-        let start = std::time::Instant::now();
-        loop {
-            let current = self.stream_head.load(Ordering::Acquire);
-            if current >= target {
-                break;
-            }
-            
-            let elapsed = start.elapsed();
-            if elapsed.as_micros() < 50 {
-                // 1. Busy spinning (< 50µs)
-                std::hint::spin_loop();
-            } else if elapsed.as_micros() < 500 {
-                // 2. Yielding (< 500µs)
-                std::thread::yield_now();
-            } else {
-                // 3. Thread parking/Futex sleep to prevent burning CPU
-                if let Ok(mut guard) = self.waiter_thread.lock() {
-                    *guard = Some(std::thread::current());
-                }
-                
-                // Double check before parking to avoid race condition
-                let check = self.stream_head.load(Ordering::Acquire);
-                if check >= target {
-                    break;
-                }
-                
-                std::thread::park_timeout(std::time::Duration::from_millis(10));
-            }
+        let mut guard = self.condvar_mutex.lock().unwrap();
+        while self.stream_head.load(Ordering::Acquire) < target {
+            guard = self.condvar.wait(guard).unwrap();
         }
         Ok(())
     }

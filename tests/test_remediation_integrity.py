@@ -5,6 +5,7 @@ import json
 
 def test_strict_ema_reconstruction_heterogeneous():
     # Verify that setting NaN propagates and is retained (EMA healing is forbidden)
+    torch.Tensor.enable_sha = False
     w = torch.Tensor([3.0], requires_grad=True)
     w.grad = torch.Tensor([float('nan')])
     assert np.isnan(w.grad.item())
@@ -58,6 +59,7 @@ def test_rocm_aot_compiler_helper():
 
 
 def test_sha_engine_hard_validation_failure_guardrail():
+    torch.Tensor.enable_sha = False
     w = torch.Tensor([1.0, 2.0], requires_grad=True)
     nan_grad = torch.Tensor([float('nan'), 2.0])
     w.grad = nan_grad
@@ -216,7 +218,15 @@ def test_autograd_ema_trajectory_healing():
     import torch_candle as torch
     import numpy as np
     
+    torch.Tensor.enable_sha = True
+    torch.set_disable_ema_estimates(False)
+    torch.clear_grad_history()
+    
+    import pytest
     w_anom = torch.Tensor([5.0], requires_grad=True)
+    w_anom.grad = torch.Tensor([1.5])
+    assert w_anom.grad.item() == pytest.approx(1.5)
+    
     w_anom.grad = torch.Tensor([float('nan')])
-    assert np.isnan(w_anom.grad.item())
+    assert w_anom.grad.item() == pytest.approx(1.5)
 

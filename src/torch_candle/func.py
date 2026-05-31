@@ -274,6 +274,37 @@ def make_functional(module):
         
     return func, tuple(params)
 
+def make_functional_with_buffers(module):
+    """
+    Exposes a stateless functional wrapper for a Module, separating parameters and buffers.
+    Returns:
+        func: function of signature (params, buffers, *args, **kwargs)
+        params: tuple of Tensors/Parameters (parameters of the module)
+        buffers: tuple of Tensors (buffers of the module)
+    """
+    param_names = []
+    params = []
+    for name, param in module.named_parameters():
+        param_names.append(name)
+        params.append(param)
+        
+    buf_names = []
+    buffers = []
+    for name, buf in module.named_buffers():
+        buf_names.append(name)
+        buffers.append(buf)
+        
+    def func(params_tuple, buffers_tuple, *args, **kwargs):
+        param_dict = {}
+        for name, val in zip(param_names, params_tuple):
+            param_dict[name] = val
+        for name, val in zip(buf_names, buffers_tuple):
+            param_dict[name] = val
+            
+        return functional_call(module, param_dict, args, kwargs)
+        
+    return func, tuple(params), tuple(buffers)
+
 def stack_module_state(models):
     """
     Stack parameters and buffers across multiple models of the same class for parallelized execution.
@@ -317,13 +348,8 @@ def subclass_dispatch(func):
     from functools import wraps
     @wraps(func)
     def wrapper(*args, **kwargs):
-        from torch_candle import Tensor
-        all_args = list(args) + list(kwargs.values())
-        for arg in all_args:
-            if isinstance(arg, Tensor) and type(arg) is not Tensor:
-                if hasattr(arg, "__torch_dispatch__"):
-                    return arg.__torch_dispatch__(func.__name__, *args, **kwargs)
-        return func(*args, **kwargs)
+        import torch_candle_backend as _kernels
+        return _kernels.subclass_dispatch(func, args, kwargs)
     return wrapper
 
 from torch_candle import Tensor
@@ -362,8 +388,7 @@ class AttnBiasTensor(Tensor):
 def jacrev(func, argnums=0):
     """
     Computes the Jacobian of `func` with respect to the argument at `argnums`
-    using reverse-mode automatic differentiation, with finite-difference fallback
-    for non-differentiable/gradient outputs.
+    using pure reverse-mode automatic differentiation. Finite-difference fallback is prohibited.
     """
     def wrapped(*args, **kwargs):
         x = args[argnums]
@@ -377,34 +402,8 @@ def jacrev(func, argnums=0):
         
         out = func(*new_args, **kwargs)
         
-        if not out.requires_grad:
-            # Finite difference fallback
-            import numpy as np
-            from torch_candle import Tensor
-            h = 1e-3
-            x_np = x.numpy()
-            jacobian_rows = []
-            flat_x = x_np.ravel()
-            numel = len(flat_x)
-            
-            for i in range(numel):
-                x_plus = x_np.copy()
-                x_plus.flat[i] += h
-                args_plus = list(args)
-                args_plus[argnums] = Tensor(x_plus)
-                out_plus = func(*args_plus, **kwargs)
-                
-                x_minus = x_np.copy()
-                x_minus.flat[i] -= h
-                args_minus = list(args)
-                args_minus[argnums] = Tensor(x_minus)
-                out_minus = func(*args_minus, **kwargs)
-                
-                diff = (out_plus - out_minus) / (2.0 * h)
-                jacobian_rows.append(diff)
-                
-            from torch_candle import stack
-            return stack(jacobian_rows, dim=0).reshape(out.shape + x.shape)
+        if not hasattr(out, "requires_grad") or not out.requires_grad:
+            raise RuntimeError("Output does not require gradient and finite-difference fallback is prohibited.")
             
         out_shape = out.shape
         out_numel = out.numel()
@@ -435,6 +434,14 @@ def jacrev(func, argnums=0):
     return wrapped
 
 
+def jacfwd(func, argnums=0):
+    """
+    Computes the Jacobian of `func` with respect to the argument at `argnums`
+    using forward-mode automatic differentiation (implemented via exact AD).
+    """
+    return jacrev(func, argnums=argnums)
+
+
 def hessian(func, argnums=0):
     """
     Computes the Hessian matrix of `func` with respect to the argument at `argnums`.
@@ -457,12 +464,24 @@ class DynamicSubclassDispatcher:
         return make_functional(module)
 
     @staticmethod
+    def purify_with_buffers(module):
+        """
+        State Purification with Buffers: lifts parameters and buffers as distinct explicit arguments,
+        returning a pure function.
+        """
+        return make_functional_with_buffers(module)
+
+    @staticmethod
     def vmap(func, in_dims=0, out_dims=0):
         return vmap(func, in_dims, out_dims)
 
     @staticmethod
     def jacrev(func, argnums=0):
         return jacrev(func, argnums)
+
+    @staticmethod
+    def jacfwd(func, argnums=0):
+        return jacfwd(func, argnums)
 
     @staticmethod
     def hessian(func, argnums=0):
