@@ -246,3 +246,29 @@ def test_rocm_backend_dispatch():
     torch.register_privateuse1_backend("rocm")
     torch.register_privateuse1_backend("hip")
 
+def test_proactive_block_reclaim():
+    import torch_candle_backend as _kernels
+    alloc = _kernels.StreamAwareAllocator()
+    ptr = alloc.allocate(1024, 0, "test_tag")
+    alloc.record_stream(ptr, 1)
+    alloc.free(ptr, 0)
+    alloc.cuda_free(ptr)
+
+def test_hard_error_regression():
+    import torch_candle as torch
+    torch.set_disable_ema_estimates(True)
+    assert torch.get_disable_ema_estimates() == True
+    torch.set_disable_ema_estimates(False)
+    assert torch.get_disable_ema_estimates() == False
+
+def test_zero_tool_call_guard():
+    import torch_candle as torch
+    torch.reset_kernel_call_count()
+    assert torch.get_kernel_call_count() == 0
+    
+    import torch_candle_backend as _kernels
+    import numpy as np
+    x = np.array([1.0, -2.0, 3.0], dtype=np.float32)
+    _kernels.fast_relu(x)
+    assert torch.get_kernel_call_count() > 0
+

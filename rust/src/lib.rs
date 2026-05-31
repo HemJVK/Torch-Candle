@@ -65,6 +65,11 @@ mod jit;
 
 static ENABLE_SHA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static GRAD_HISTORY: Mutex<Option<HashMap<usize, Vec<f32>>>> = Mutex::new(None);
+static DISABLE_EMA_ESTIMATES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+thread_local! {
+    static KERNEL_CALL_COUNT: std::cell::Cell<usize> = std::cell::Cell::new(0);
+}
 
 fn get_python_grad_history(py: Python<'_>, param_id: usize) -> Option<(Vec<usize>, Vec<f32>)> {
     if let Ok(tensor_mod) = py.import_bound("torch_candle") {
@@ -977,7 +982,9 @@ impl PyTensor {
             let mut g_opt = g_mutex.lock();
             if let Some(ref g) = *g_opt {
                 let mut res_g = g.clone();
-                let sha_enabled = ENABLE_SHA.load(std::sync::atomic::Ordering::Relaxed) && get_python_enable_sha(py);
+                let sha_enabled = ENABLE_SHA.load(std::sync::atomic::Ordering::Relaxed)
+                    && get_python_enable_sha(py)
+                    && !DISABLE_EMA_ESTIMATES.load(std::sync::atomic::Ordering::Relaxed);
                 
                 if self.requires_grad && sha_enabled {
                     let shape = res_g.dims().to_vec();
@@ -1823,6 +1830,7 @@ impl PyTensor {
 
 #[pyfunction]
 fn fast_relu(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
+    increment_kernel_call_count();
     let mut x_mut = unsafe { x.as_array_mut() };
     kernels::fast_relu(x_mut.view_mut());
     Ok(())
@@ -1830,6 +1838,7 @@ fn fast_relu(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
 
 #[pyfunction]
 fn fast_sigmoid(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
+    increment_kernel_call_count();
     let mut x_mut = unsafe { x.as_array_mut() };
     kernels::fast_sigmoid(x_mut.view_mut());
     Ok(())
@@ -1837,6 +1846,7 @@ fn fast_sigmoid(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
 
 #[pyfunction]
 fn fast_tanh(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
+    increment_kernel_call_count();
     let mut x_mut = unsafe { x.as_array_mut() };
     kernels::fast_tanh(x_mut.view_mut());
     Ok(())
@@ -1844,6 +1854,7 @@ fn fast_tanh(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
 
 #[pyfunction]
 fn fast_silu(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
+    increment_kernel_call_count();
     let mut x_mut = unsafe { x.as_array_mut() };
     kernels::fast_silu(x_mut.view_mut());
     Ok(())
@@ -1851,6 +1862,7 @@ fn fast_silu(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
 
 #[pyfunction]
 fn fast_gelu(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
+    increment_kernel_call_count();
     let mut x_mut = unsafe { x.as_array_mut() };
     kernels::fast_gelu(x_mut.view_mut());
     Ok(())
@@ -1858,6 +1870,7 @@ fn fast_gelu(x: &Bound<'_, PyArrayDyn<f32>>) -> PyResult<()> {
 
 #[pyfunction]
 fn fast_softmax(x: &Bound<'_, PyArrayDyn<f32>>, dim: isize) -> PyResult<()> {
+    increment_kernel_call_count();
     let mut x_mut = unsafe { x.as_array_mut() };
     kernels::fast_softmax(x_mut.view_mut(), dim);
     Ok(())
@@ -1871,6 +1884,7 @@ fn fast_layer_norm(
     bias: Option<&Bound<'_, PyArrayDyn<f32>>>,
     eps: f32,
 ) -> PyResult<()> {
+    increment_kernel_call_count();
     let mut x_mut = unsafe { x.as_array_mut() };
     let w_slice = match weight {
         Some(w) => Some(unsafe { w.as_slice()? }),
@@ -1896,6 +1910,7 @@ fn fast_adam_step(
     eps: f32,
     step: i32,
 ) -> PyResult<()> {
+    increment_kernel_call_count();
     let mut p_mut = unsafe { param.as_array_mut() };
     let g_slice = unsafe { grad.as_slice()? };
     let mut m_mut = unsafe { m.as_array_mut() };
@@ -1919,6 +1934,7 @@ fn vectorized_forward(
     state: std::collections::HashMap<String, PyTensor>,
     inputs: &PyTensor
 ) -> PyResult<PyTensor> {
+    increment_kernel_call_count();
     let weight = state.get("layer1.weight")
         .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("layer1.weight not found"))?;
     
@@ -1951,6 +1967,37 @@ fn get_enable_sha() -> bool {
 fn clear_grad_history() {
     let mut history_opt = GRAD_HISTORY.lock();
     *history_opt = Some(HashMap::new());
+}
+
+#[pyfunction]
+fn set_disable_ema_estimates(val: bool) {
+    DISABLE_EMA_ESTIMATES.store(val, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[pyfunction]
+fn get_disable_ema_estimates() -> bool {
+    DISABLE_EMA_ESTIMATES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[pyfunction]
+fn increment_kernel_call_count() {
+    KERNEL_CALL_COUNT.with(|count| {
+        count.set(count.get() + 1);
+    });
+}
+
+#[pyfunction]
+fn get_kernel_call_count() -> usize {
+    KERNEL_CALL_COUNT.with(|count| {
+        count.get()
+    })
+}
+
+#[pyfunction]
+fn reset_kernel_call_count() {
+    KERNEL_CALL_COUNT.with(|count| {
+        count.set(0);
+    });
 }
 
 use parking_lot::RwLock;
@@ -1994,6 +2041,7 @@ impl PyDispatchRegistry {
 
     #[staticmethod]
     pub fn dispatch(op_name: String, backend_name: String, py: Python<'_>, args: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<PyObject> {
+        increment_kernel_call_count();
         let registry = get_dispatch_registry();
         let kernels = registry.kernels.read();
         if let Some(op_entry) = kernels.get(&op_name) {
@@ -2052,6 +2100,7 @@ fn get_active_dispatch_level() -> usize {
 
 #[pymodule]
 fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    std::env::set_var("MALLOC_MMAP_THRESHOLD_", "131072");
     unsafe {
         mallopt(3, 131072);
     }
@@ -2082,5 +2131,10 @@ fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pop_dispatch_level, m)?)?;
     m.add_function(wrap_pyfunction!(get_active_dispatch_level, m)?)?;
     m.add_function(wrap_pyfunction!(jit::compile_ast, m)?)?;
+    m.add_function(wrap_pyfunction!(set_disable_ema_estimates, m)?)?;
+    m.add_function(wrap_pyfunction!(get_disable_ema_estimates, m)?)?;
+    m.add_function(wrap_pyfunction!(increment_kernel_call_count, m)?)?;
+    m.add_function(wrap_pyfunction!(get_kernel_call_count, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_kernel_call_count, m)?)?;
     Ok(())
 }

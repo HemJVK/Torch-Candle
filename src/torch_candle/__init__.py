@@ -116,6 +116,21 @@ def clear_grad_history():
     """
     _kernels.clear_grad_history()
 
+def set_disable_ema_estimates(val: bool):
+    """
+    Enable or disable EMA-based stable gradient estimates (e.g. during tgold runs).
+    """
+    _kernels.set_disable_ema_estimates(val)
+
+def get_disable_ema_estimates() -> bool:
+    return _kernels.get_disable_ema_estimates()
+
+def get_kernel_call_count() -> int:
+    return _kernels.get_kernel_call_count()
+
+def reset_kernel_call_count():
+    _kernels.reset_kernel_call_count()
+
 # ============================================================
 # Context Managers — torch.no_grad / enable_grad
 # ============================================================

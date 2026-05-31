@@ -126,6 +126,29 @@ impl StreamAwareAllocator {
         if blocks.remove(&ptr).is_some() {
             println!("🚀 [StreamAwareAllocator] cudaFree(): API-level release of GPU memory for address 0x{:x}", ptr);
         }
+        
+        // Proactive metadata reconciliation to avoid OOM latency spikes
+        blocks.retain(|_, block| {
+            if block.is_idle && block.recorded_streams.is_empty() {
+                println!("🚀 [StreamAwareAllocator] Proactive Reclaim: Freeing address 0x{:x} from heap", block.ptr);
+                false
+            } else {
+                true
+            }
+        });
+        Ok(())
+    }
+
+    pub fn reclaim_idle_blocks(&self) -> PyResult<()> {
+        let mut blocks = self.blocks.lock().unwrap();
+        blocks.retain(|_, block| {
+            if block.is_idle && block.recorded_streams.is_empty() {
+                println!("🚀 [StreamAwareAllocator] Proactive Reclaim: Freeing address 0x{:x} from heap", block.ptr);
+                false
+            } else {
+                true
+            }
+        });
         Ok(())
     }
 
