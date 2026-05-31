@@ -223,3 +223,67 @@ def test_vmap_state_dispatcher_vectorized():
     stacked_out = torch.VmapDispatcher.vectorized_forward([t1._tensor, t2._tensor], "relu")
     assert stacked_out is not None
     assert stacked_out.shape == [2, 2]
+
+
+def test_ast_recursive_descent_parser():
+    from torch_candle_backend import NativeASTParser
+    compiler = NativeASTParser.parse_expression("x + y * 2.0")
+    assert compiler is not None
+    # We should have nodes matching: constant, binop (multiply), binop (add)
+    nodes = compiler.block.nodes
+    assert len(nodes) >= 2
+    op_names = [n.op_name for n in nodes]
+    assert "binop" in op_names
+    assert "constant" in op_names
+
+
+def test_zero_tool_call_guard_validation():
+    import pytest
+    from torch_candle import ZeroToolCallGuard, HardValidationFailure
+    
+    ZeroToolCallGuard.reset_tool_call_count()
+    assert ZeroToolCallGuard.get_tool_call_count() == 0
+    
+    # Success with 0 tool calls should raise HardValidationFailure
+    with pytest.raises(HardValidationFailure) as excinfo:
+        ZeroToolCallGuard.verify_execution("Success")
+    assert "Zero-Tool-Call Guard" in str(excinfo.value)
+    
+    # Non-success terminal states should not raise
+    ZeroToolCallGuard.verify_execution("Failure")
+    
+    # Success with > 0 tool calls should not raise
+    ZeroToolCallGuard.increment_tool_call_count()
+    assert ZeroToolCallGuard.get_tool_call_count() == 1
+    ZeroToolCallGuard.verify_execution("Success")
+
+
+def test_autograd_ema_trajectory_healing():
+    import torch_candle as torch
+    import numpy as np
+    
+    # Clear history
+    from torch_candle_backend import clear_grad_history
+    clear_grad_history()
+    
+    # 1. Establish stable gradient history (g_t-1)
+    w = torch.Tensor([5.0], requires_grad=True)
+    loss = w * 2.0
+    loss.backward()
+    assert w.grad.item() == 2.0
+    
+    # 2. Trigger nan gradient propagation
+    w_anom = torch.Tensor([5.0], requires_grad=True)
+    # Put history in GRAD_HISTORY
+    torch.Tensor._grad_history[id(w_anom)] = {
+        "shape": [1],
+        "data": [2.0]
+    }
+    
+    # Set gradient directly to nan/inf to trigger healing
+    w_anom.grad = torch.Tensor([float('nan')])
+    
+    # Assert it gets reconstructed/healed to the historical 2.0 instead of being clipped to 0.0!
+    healed = w_anom.grad
+    assert healed.item() == 2.0
+

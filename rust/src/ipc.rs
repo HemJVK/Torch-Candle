@@ -104,12 +104,6 @@ impl SPSCRingBuffer {
         };
         
         layout.head.val.store(head.wrapping_add(1), Ordering::Release);
-        
-        // Unpark reader thread if it was parked (Hybrid Wait Strategy Integration)
-        if let Some(thread) = self.reader_thread.lock().take() {
-            thread.unpark();
-        }
-        
         Ok(())
     }
 
@@ -131,7 +125,6 @@ impl SPSCRingBuffer {
 
     pub fn wait_and_pop(&self, py: Python<'_>) -> PyResult<TaskMetadata> {
         let layout = unsafe { &mut *self.raw_ptr };
-        let start = std::time::Instant::now();
         let tail = layout.tail.val.load(Ordering::Relaxed);
         
         py.allow_threads(|| {
@@ -143,29 +136,7 @@ impl SPSCRingBuffer {
                     layout.tail.val.store(tail.wrapping_add(1), Ordering::Release);
                     return Ok(task);
                 }
-                
-                let elapsed = start.elapsed();
-                if elapsed.as_micros() < 50 {
-                    // 1. Busy spinning (< 50µs)
-                    std::hint::spin_loop();
-                } else if elapsed.as_micros() < 500 {
-                    // 2. Yielding (< 500µs)
-                    std::thread::yield_now();
-                } else {
-                    // 3. Thread parking/Futex sleep to prevent burning CPU
-                    {
-                        let mut guard = self.reader_thread.lock();
-                        *guard = Some(std::thread::current());
-                    }
-                    
-                    // Double check before parking to avoid race condition
-                    let head_check = layout.head.val.load(Ordering::Acquire);
-                    if tail != head_check {
-                        continue;
-                    }
-                    
-                    std::thread::park_timeout(std::time::Duration::from_millis(10));
-                }
+                std::hint::spin_loop();
             }
         })
     }

@@ -133,6 +133,36 @@ class HardValidationFailure(Exception):
     """
     pass
 
+class ZeroToolCallGuard:
+    """
+    Middleware guard to verify that the agent execution actually invoked tools in the sandbox
+    rather than reporting a phantom success.
+    """
+    _tool_call_count = 0
+
+    @classmethod
+    def increment_tool_call_count(cls):
+        cls._tool_call_count += 1
+
+    @classmethod
+    def reset_tool_call_count(cls):
+        cls._tool_call_count = 0
+
+    @classmethod
+    def get_tool_call_count(cls) -> int:
+        return cls._tool_call_count
+
+    @classmethod
+    def verify_execution(cls, agent_state: str):
+        """
+        Validates terminal state. If 'Success' but tool calls are 0, triggers HardValidationFailure nudge.
+        """
+        if agent_state.lower() == "success" and cls._tool_call_count == 0:
+            raise HardValidationFailure(
+                "🚨 [Zero-Tool-Call Guard] Phantom Agent detected: "
+                "Agent reported 'Success' but executed 0 tool calls! Triggering automatic nudge/retry."
+            )
+
 DISABLE_EMA_ESTIMATES = False
 
 def set_disable_ema_estimates(val: bool):

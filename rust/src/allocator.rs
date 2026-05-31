@@ -45,6 +45,7 @@ pub struct StreamAwareAllocator {
     next_ptr: Mutex<usize>,
     next_event_id: Mutex<u32>,
     pub stream_head: AtomicUsize,
+    _pad: [u8; 128],
     pub stream_tail: AtomicUsize,
 }
 
@@ -58,6 +59,7 @@ impl StreamAwareAllocator {
             next_ptr: Mutex::new(1000000),
             next_event_id: Mutex::new(1),
             stream_head: AtomicUsize::new(0),
+            _pad: [0u8; 128],
             stream_tail: AtomicUsize::new(0),
         }
     }
@@ -162,7 +164,7 @@ impl StreamAwareAllocator {
 
     pub fn wait_event(&self, _comm_stream_id: u32, event: StreamEvent) -> PyResult<()> {
         while !event.query() {
-            std::thread::yield_now();
+            std::hint::spin_loop();
         }
         Ok(())
     }
@@ -182,20 +184,12 @@ impl StreamAwareAllocator {
     }
 
     pub fn wait_for_stream_completion(&self, target: usize) -> PyResult<()> {
-        let start = std::time::Instant::now();
         loop {
             let current = self.stream_head.load(Ordering::Acquire);
             if current >= target {
                 break;
             }
-            let elapsed = start.elapsed();
-            if elapsed.as_micros() < 50 {
-                // 1. Busy spin (< 50µs)
-                std::hint::spin_loop();
-            } else {
-                // 2. Yield execution to stay warm (> 50µs)
-                std::thread::yield_now();
-            }
+            std::hint::spin_loop();
         }
         Ok(())
     }

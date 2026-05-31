@@ -376,109 +376,145 @@ fn tokenize(expr: &str) -> Vec<Token> {
     tokens
 }
 
-fn precedence(op: char) -> i32 {
-    match op {
-        '+' | '-' => 1,
-        '*' | '/' => 2,
-        _ => 0,
+#[derive(Debug, Clone)]
+pub enum ASTNode {
+    Number(f64),
+    Identifier(String),
+    BinaryOp {
+        op: char,
+        left: Box<ASTNode>,
+        right: Box<ASTNode>,
+    },
+}
+
+struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
+}
+
+impl Parser {
+    fn new(tokens: Vec<Token>) -> Self {
+        Self { tokens, pos: 0 }
+    }
+
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.pos)
+    }
+
+    fn next_token(&mut self) -> Option<Token> {
+        if self.pos < self.tokens.len() {
+            let t = self.tokens[self.pos].clone();
+            self.pos += 1;
+            Some(t)
+        } else {
+            None
+        }
+    }
+
+    fn parse_expression(&mut self) -> PyResult<ASTNode> {
+        let mut node = self.parse_term()?;
+        while let Some(Token::Operator(op)) = self.peek() {
+            if *op == '+' || *op == '-' {
+                let op_char = *op;
+                self.next_token();
+                let right = self.parse_term()?;
+                node = ASTNode::BinaryOp {
+                    op: op_char,
+                    left: Box::new(node),
+                    right: Box::new(right),
+                };
+            } else {
+                break;
+            }
+        }
+        Ok(node)
+    }
+
+    fn parse_term(&mut self) -> PyResult<ASTNode> {
+        let mut node = self.parse_factor()?;
+        while let Some(Token::Operator(op)) = self.peek() {
+            if *op == '*' || *op == '/' {
+                let op_char = *op;
+                self.next_token();
+                let right = self.parse_factor()?;
+                node = ASTNode::BinaryOp {
+                    op: op_char,
+                    left: Box::new(node),
+                    right: Box::new(right),
+                };
+            } else {
+                break;
+            }
+        }
+        Ok(node)
+    }
+
+    fn parse_factor(&mut self) -> PyResult<ASTNode> {
+        match self.next_token() {
+            Some(Token::Number(val)) => Ok(ASTNode::Number(val)),
+            Some(Token::Identifier(name)) => Ok(ASTNode::Identifier(name)),
+            Some(Token::LParen) => {
+                let expr = self.parse_expression()?;
+                if let Some(Token::RParen) = self.next_token() {
+                    Ok(expr)
+                } else {
+                    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Mismatched parentheses"))
+                }
+            }
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid syntax")),
+        }
     }
 }
 
 pub fn parse_to_ssa(expr: &str, mut compiler: SSACompiler) -> PyResult<SSACompiler> {
     let tokens = tokenize(expr);
-    let mut output_queue: Vec<Token> = Vec::new();
-    let mut operator_stack: Vec<Token> = Vec::new();
+    let mut parser = Parser::new(tokens);
+    let ast = parser.parse_expression()?;
     
-    for token in tokens {
-        match token {
-            Token::Number(_) | Token::Identifier(_) => {
-                output_queue.push(token);
-            }
-            Token::Operator(op) => {
-                while let Some(Token::Operator(top_op)) = operator_stack.last() {
-                    if precedence(*top_op) >= precedence(op) {
-                        output_queue.push(operator_stack.pop().unwrap());
-                    } else {
-                        break;
-                    }
-                }
-                operator_stack.push(Token::Operator(op));
-            }
-            Token::LParen => {
-                operator_stack.push(Token::LParen);
-            }
-            Token::RParen => {
-                let mut found = false;
-                while let Some(top) = operator_stack.pop() {
-                    if top == Token::LParen {
-                        found = true;
-                        break;
-                    }
-                    output_queue.push(top);
-                }
-                if !found {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Mismatched parentheses"));
-                }
-            }
-        }
-    }
-    while let Some(op) = operator_stack.pop() {
-        if op == Token::LParen {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Mismatched parentheses"));
-        }
-        output_queue.push(op);
-    }
-    
-    let mut val_stack: Vec<usize> = Vec::new();
     let mut next_val_id = 1;
-    let mut var_map: HashMap<String, usize> = HashMap::new();
+    let mut var_map = HashMap::new();
     
-    for token in output_queue {
-        match token {
-            Token::Number(val) => {
-                let id = next_val_id;
-                next_val_id += 1;
-                compiler.register_value(id, "float32".to_string(), vec![1]);
-                let mut attrs = HashMap::new();
-                attrs.insert("value".to_string(), val.to_string());
-                compiler.add_node("constant".to_string(), vec![], vec![id], attrs);
-                val_stack.push(id);
-            }
-            Token::Identifier(name) => {
-                let id = *var_map.entry(name.clone()).or_insert_with(|| {
-                    let id = next_val_id;
-                    next_val_id += 1;
-                    compiler.register_value(id, "float32".to_string(), vec![1]);
-                    compiler.add_input(id);
-                    id
-                });
-                val_stack.push(id);
-            }
-            Token::Operator(op) => {
-                if val_stack.len() < 2 {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid expression format"));
-                }
-                let right_id = val_stack.pop().unwrap();
-                let left_id = val_stack.pop().unwrap();
-                let out_id = next_val_id;
-                next_val_id += 1;
-                compiler.register_value(out_id, "float32".to_string(), vec![1]);
-                
-                let mut attrs = HashMap::new();
-                attrs.insert("op".to_string(), op.to_string());
-                compiler.add_node("binop".to_string(), vec![left_id, right_id], vec![out_id], attrs);
-                val_stack.push(out_id);
-            }
-            _ => {}
-        }
-    }
-    
-    if let Some(final_out) = val_stack.pop() {
-        compiler.add_output(final_out);
-    }
+    let final_out = compile_node(&ast, &mut compiler, &mut next_val_id, &mut var_map)?;
+    compiler.add_output(final_out);
     
     compiler.compile_and_optimize()?;
     Ok(compiler)
+}
+
+fn compile_node(node: &ASTNode, compiler: &mut SSACompiler, next_val_id: &mut usize, var_map: &mut HashMap<String, usize>) -> PyResult<usize> {
+    match node {
+        ASTNode::Number(val) => {
+            let id = *next_val_id;
+            *next_val_id += 1;
+            compiler.register_value(id, "float32".to_string(), vec![1]);
+            let mut attrs = HashMap::new();
+            attrs.insert("value".to_string(), val.to_string());
+            compiler.add_node("constant".to_string(), vec![], vec![id], attrs);
+            Ok(id)
+        }
+        ASTNode::Identifier(name) => {
+            let id = *var_map.entry(name.clone()).or_insert_with(|| {
+                let id = *next_val_id;
+                *next_val_id += 1;
+                compiler.register_value(id, "float32".to_string(), vec![1]);
+                compiler.add_input(id);
+                id
+            });
+            Ok(id)
+        }
+        ASTNode::BinaryOp { op, left, right } => {
+            let left_id = compile_node(left, compiler, next_val_id, var_map)?;
+            let right_id = compile_node(right, compiler, next_val_id, var_map)?;
+            let out_id = *next_val_id;
+            *next_val_id += 1;
+            compiler.register_value(out_id, "float32".to_string(), vec![1]);
+            
+            let mut attrs = HashMap::new();
+            attrs.insert("op".to_string(), op.to_string());
+            compiler.add_node("binop".to_string(), vec![left_id, right_id], vec![out_id], attrs);
+            Ok(out_id)
+        }
+    }
 }
 
 #[pyclass]

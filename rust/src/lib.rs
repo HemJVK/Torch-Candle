@@ -1398,29 +1398,55 @@ impl PyTensor {
                 for (parent, maybe_grad) in tensor.parents.iter().zip(parent_grads) {
                     if let Some(p_grad) = maybe_grad {
                         let mut sanitized_grad = p_grad.clone();
-                        if let Ok(flat_vec) = p_grad.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
-                            let mut has_anomaly = false;
-                            for &x in &flat_vec {
-                                if x.is_nan() || x.is_infinite() {
-                                    has_anomaly = true;
-                                    break;
-                                }
-                            }
-                            if has_anomaly {
-                                println!("🚨 [Autograd Tape] Element-level anomaly intercepted in backward pass! Resolving mathematically at the node level by clipping to 0.0f32...");
-                                let shape = p_grad.dims().to_vec();
-                                let mut resolved_vec = flat_vec.clone();
-                                for val in &mut resolved_vec {
-                                    if val.is_nan() || val.is_infinite() {
-                                        *val = 0.0f32;
-                                    }
-                                }
-                                sanitized_grad = Tensor::from_vec(resolved_vec, shape.as_slice(), p_grad.device())
-                                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
-                            }
-                        }
                         
                         if let Some(ref pg_mutex) = parent.grad {
+                            let param_key = Arc::as_ptr(pg_mutex) as usize;
+                            
+                            if let Ok(flat_vec) = p_grad.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
+                                let mut has_anomaly = false;
+                                for &x in &flat_vec {
+                                    if x.is_nan() || x.is_infinite() {
+                                        has_anomaly = true;
+                                        break;
+                                    }
+                                }
+                                
+                                let mut history_opt = GRAD_HISTORY.lock();
+                                let history = history_opt.get_or_insert_with(HashMap::new);
+                                
+                                if has_anomaly {
+                                    println!("🚨 [Autograd Tape] Element-level anomaly intercepted in backward pass! Performing mathematical reconstruction using EMA history...");
+                                    let mut healthy_vec = vec![0.0f32; flat_vec.len()];
+                                    if let Some(hist_vec) = history.get(&param_key) {
+                                        if hist_vec.len() == flat_vec.len() {
+                                            healthy_vec = hist_vec.clone();
+                                        }
+                                    }
+                                    
+                                    let mut healed_grad = flat_vec.clone();
+                                    for i in 0..healed_grad.len() {
+                                        if healed_grad[i].is_nan() || healed_grad[i].is_infinite() {
+                                            healed_grad[i] = healthy_vec[i];
+                                        }
+                                    }
+                                    
+                                    let shape = p_grad.dims().to_vec();
+                                    sanitized_grad = Tensor::from_vec(healed_grad, shape.as_slice(), p_grad.device())
+                                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+                                } else {
+                                    // Update EMA history for this parent gradient
+                                    let entry = history.entry(param_key).or_insert_with(|| flat_vec.clone());
+                                    if entry.len() == flat_vec.len() {
+                                        let beta = 0.9f32;
+                                        for i in 0..entry.len() {
+                                            entry[i] = beta * entry[i] + (1.0 - beta) * flat_vec[i];
+                                        }
+                                    } else {
+                                        *entry = flat_vec.clone();
+                                    }
+                                }
+                            }
+                            
                             let mut pg_opt = pg_mutex.lock();
                             if let Some(ref current_pg) = *pg_opt {
                                 *pg_opt = Some(current_pg.add(&sanitized_grad).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?);
@@ -2200,9 +2226,9 @@ impl VmapDispatcher {
 
 #[pymodule]
 fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    std::env::set_var("MALLOC_MMAP_THRESHOLD_", "131072");
+    std::env::set_var("MALLOC_MMAP_THRESHOLD_", "65536");
     unsafe {
-        mallopt(3, 131072);
+        mallopt(3, 65536);
     }
     m.add_class::<PyTensor>()?;
     m.add_class::<ipc::SPSCRingBuffer>()?;
