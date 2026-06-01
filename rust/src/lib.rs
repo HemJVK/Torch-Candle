@@ -1366,7 +1366,7 @@ impl PyTensor {
         topo_order.reverse(); // Now it's from output to inputs
 
         for tensor in topo_order.clone() {
-            let mut current_grad = {
+            let current_grad = {
                 let g_mutex = tensor.grad.as_ref().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Tensor in topo order lacks grad Arc"))?;
                 let g_opt = g_mutex.lock();
                 match *g_opt {
@@ -1374,23 +1374,6 @@ impl PyTensor {
                     None => continue, // No gradient reached this node yet
                 }
             };
-
-            let enable_sha = get_python_enable_sha(_py);
-            let disable_ema = get_disable_ema_estimates(_py);
-            if enable_sha && !disable_ema && has_nan_or_inf(&current_grad) {
-                let param_id = Arc::as_ptr(tensor.grad.as_ref().unwrap()) as usize;
-                if let Some((shape, hist_data)) = get_python_grad_history(_py, param_id) {
-                    let beta = 0.9f32;
-                    let healed_data: Vec<f32> = hist_data.iter().map(|&x| x * beta).collect();
-                    if let Ok(healed_tensor) = Tensor::from_vec(healed_data, shape.as_slice(), current_grad.device()) {
-                        current_grad = healed_tensor;
-                        if let Some(ref g_mutex) = tensor.grad {
-                            let mut g_opt = g_mutex.lock();
-                            *g_opt = Some(current_grad.clone());
-                        }
-                    }
-                }
-            }
 
             if let Some(ref node) = tensor.grad_fn {
                 let parent_grads = node.backward(&current_grad);
@@ -1403,22 +1386,6 @@ impl PyTensor {
                             } else {
                                 *pg_opt = Some(p_grad);
                             }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Save healthy gradients to history
-        for tensor in &topo_order {
-            if let Some(ref g_mutex) = tensor.grad {
-                let g_opt = g_mutex.lock();
-                if let Some(ref g) = *g_opt {
-                    if !has_nan_or_inf(g) {
-                        if let Ok(vec) = g.flatten_all().and_then(|x| x.to_vec1::<f32>()) {
-                            let shape = g.dims().to_vec();
-                            let param_id = Arc::as_ptr(g_mutex) as usize;
-                            save_python_grad_history(_py, param_id, shape, vec);
                         }
                     }
                 }
@@ -2011,21 +1978,31 @@ fn fast_adamw_step(
     let mut v_ref = v.try_borrow_mut()?;
 
     let dev = p.inner.device();
-    let g_aligned = if format!("{:?}", g.inner.device()) != format!("{:?}", dev) {
-        g.inner.to_device(dev).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
-    } else {
-        g.inner.clone()
-    };
-    let m_aligned = if format!("{:?}", m_ref.inner.device()) != format!("{:?}", dev) {
-        m_ref.inner.to_device(dev).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
-    } else {
-        m_ref.inner.clone()
-    };
-    let v_aligned = if format!("{:?}", v_ref.inner.device()) != format!("{:?}", dev) {
-        v_ref.inner.to_device(dev).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
-    } else {
-        v_ref.inner.clone()
-    };
+    let dev_str = format!("{:?}", dev);
+
+    // Hardware Boundary Validation: Any operand mismatch must raise a RuntimeError
+    if format!("{:?}", g.inner.device()) != dev_str {
+        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Hardware Boundary Violation: Operand mismatch: parameter is on {:?}, but gradient is on {:?}",
+            dev, g.inner.device()
+        )));
+    }
+    if format!("{:?}", m_ref.inner.device()) != dev_str {
+        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Hardware Boundary Violation: Operand mismatch: parameter is on {:?}, but momentum (m) is on {:?}",
+            dev, m_ref.inner.device()
+        )));
+    }
+    if format!("{:?}", v_ref.inner.device()) != dev_str {
+        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Hardware Boundary Violation: Operand mismatch: parameter is on {:?}, but velocity (v) is on {:?}",
+            dev, v_ref.inner.device()
+        )));
+    }
+
+    let g_aligned = g.inner.clone();
+    let m_aligned = m_ref.inner.clone();
+    let v_aligned = v_ref.inner.clone();
 
     let wd_factor = 1.0 - lr * wd;
     let mut new_p = if wd != 0.0 {
@@ -2170,6 +2147,27 @@ impl PyDispatchRegistry {
     #[classmethod]
     pub fn dispatch(_cls: &Bound<'_, pyo3::types::PyType>, op_name: String, backend_name: String, py: Python<'_>, args: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<PyObject> {
         increment_kernel_call_count();
+        
+        // Device-Aware Kernel Registration: verify all PyTensor arguments reside on matching hardware device
+        let mut first_device: Option<String> = None;
+        for i in 0..args.len() {
+            let item = args.get_item(i)?;
+            if let Ok(tensor_bound) = item.downcast::<PyTensor>() {
+                let tensor_ref = tensor_bound.borrow();
+                let dev_str = format!("{:?}", tensor_ref.inner.device());
+                if let Some(ref first_dev) = first_device {
+                    if &dev_str != first_dev {
+                        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                            "Hardware Boundary Violation in '{}' dispatch: Cross-device arithmetic scheduling blocked between {} and {}",
+                            op_name, first_dev, dev_str
+                        )));
+                    }
+                } else {
+                    first_device = Some(dev_str);
+                }
+            }
+        }
+
         let registry = get_dispatch_registry();
         let kernels = registry.kernels.read();
         if let Some(op_entry) = kernels.get(&op_name) {

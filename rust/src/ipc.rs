@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use pyo3::prelude::*;
-use std::sync::Arc;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -48,8 +47,6 @@ pub struct SPSCRingBuffer {
     raw_ptr: *mut SPSCRingBufferLayout,
     is_owner: bool,
     is_mmap: bool,
-    condvar: Arc<std::sync::Condvar>,
-    condvar_mutex: Arc<std::sync::Mutex<()>>,
 }
 
 unsafe impl Send for SPSCRingBuffer {}
@@ -61,8 +58,6 @@ impl Clone for SPSCRingBuffer {
             raw_ptr: self.raw_ptr,
             is_owner: false,
             is_mmap: self.is_mmap,
-            condvar: self.condvar.clone(),
-            condvar_mutex: self.condvar_mutex.clone(),
         }
     }
 }
@@ -93,8 +88,6 @@ impl SPSCRingBuffer {
                         raw_ptr: raw_ptr as *mut SPSCRingBufferLayout,
                         is_owner: true,
                         is_mmap: true,
-                        condvar: Arc::new(std::sync::Condvar::new()),
-                        condvar_mutex: Arc::new(std::sync::Mutex::new(())),
                     };
                 }
             }
@@ -111,8 +104,6 @@ impl SPSCRingBuffer {
             raw_ptr,
             is_owner: true,
             is_mmap: false,
-            condvar: Arc::new(std::sync::Condvar::new()),
-            condvar_mutex: Arc::new(std::sync::Mutex::new(())),
         }
     }
 
@@ -154,8 +145,6 @@ impl SPSCRingBuffer {
                 raw_ptr: raw_ptr as *mut SPSCRingBufferLayout,
                 is_owner,
                 is_mmap: true,
-                condvar: Arc::new(std::sync::Condvar::new()),
-                condvar_mutex: Arc::new(std::sync::Mutex::new(())),
             })
         }
     }
@@ -163,10 +152,37 @@ impl SPSCRingBuffer {
     pub fn push(&self, op_code: u32, device_id: u32, payload_bytes: Vec<u8>) -> PyResult<()> {
         let layout = unsafe { &mut *self.raw_ptr };
         let head = layout.head.val.load(Ordering::Relaxed);
-        let tail = layout.tail.val.load(Ordering::Acquire);
         
-        if head.wrapping_sub(tail) >= 1024 {
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Ring buffer is full"));
+        let start = std::time::Instant::now();
+        loop {
+            let tail = layout.tail.val.load(Ordering::Acquire);
+            if head.wrapping_sub(tail) < 1024 {
+                break;
+            }
+            
+            let elapsed = start.elapsed().as_micros();
+            if elapsed < 50 {
+                std::hint::spin_loop();
+            } else if elapsed < 1000 {
+                std::thread::yield_now();
+            } else {
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    libc::syscall(
+                        libc::SYS_futex,
+                        &layout.tail.val as *const AtomicUsize as *mut i32,
+                        libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
+                        tail as i32,
+                        std::ptr::null::<libc::timespec>(),
+                        std::ptr::null::<i32>(),
+                        0,
+                    );
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
         }
         
         let index = head % 1024;
@@ -184,7 +200,15 @@ impl SPSCRingBuffer {
         
         layout.head.val.store(head.wrapping_add(1), Ordering::Release);
         
-        self.condvar.notify_all();
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::syscall(
+                libc::SYS_futex,
+                &layout.head.val as *const AtomicUsize as *mut i32,
+                libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+                1 as libc::c_int,
+            );
+        }
         
         Ok(())
     }
@@ -202,6 +226,17 @@ impl SPSCRingBuffer {
         let task = layout.buffer[index];
         
         layout.tail.val.store(tail.wrapping_add(1), Ordering::Release);
+        
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::syscall(
+                libc::SYS_futex,
+                &layout.tail.val as *const AtomicUsize as *mut i32,
+                libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+                1 as libc::c_int,
+            );
+        }
+        
         Ok(Some(task))
     }
 
@@ -211,18 +246,34 @@ impl SPSCRingBuffer {
         
         py.allow_threads(|| {
             let start = std::time::Instant::now();
-            while layout.head.val.load(Ordering::Acquire) == tail {
-                let elapsed = start.elapsed();
-                if elapsed.as_micros() < 50 {
+            loop {
+                let current_head = layout.head.val.load(Ordering::Acquire);
+                if current_head != tail {
+                    break;
+                }
+                
+                let elapsed = start.elapsed().as_micros();
+                if elapsed < 50 {
                     std::hint::spin_loop();
-                } else if elapsed.as_micros() < 1000 {
+                } else if elapsed < 1000 {
                     std::thread::yield_now();
                 } else {
-                    let mut guard = self.condvar_mutex.lock().unwrap();
-                    while layout.head.val.load(Ordering::Acquire) == tail {
-                        guard = self.condvar.wait(guard).unwrap();
+                    #[cfg(target_os = "linux")]
+                    unsafe {
+                        libc::syscall(
+                            libc::SYS_futex,
+                            &layout.head.val as *const AtomicUsize as *mut i32,
+                            libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
+                            current_head as i32,
+                            std::ptr::null::<libc::timespec>(),
+                            std::ptr::null::<i32>(),
+                            0,
+                        );
                     }
-                    break;
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
                 }
             }
             Ok::<(), PyErr>(())
@@ -231,6 +282,17 @@ impl SPSCRingBuffer {
         let index = tail % 1024;
         let task = layout.buffer[index];
         layout.tail.val.store(tail.wrapping_add(1), Ordering::Release);
+        
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::syscall(
+                libc::SYS_futex,
+                &layout.tail.val as *const AtomicUsize as *mut i32,
+                libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+                1 as libc::c_int,
+            );
+        }
+        
         Ok(task)
     }
 

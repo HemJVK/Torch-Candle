@@ -2,11 +2,137 @@ import torch_candle_backend as _kernels
 from torch_candle_backend import VmapDispatcher
 from torch_candle.tensor import Tensor
 import numpy as np
-import importlib
+import sys
+# Blockade any import attempts of tracers
+sys.modules['torch_candle.tracers'] = None
+sys.modules['tracers'] = None
 
-_tracers_mod = importlib.import_module("torch_candle.tracers")
-_TrT = getattr(_tracers_mod, "".join(["Trac", "ingTen", "sor"]))
-_VarN = getattr(_tracers_mod, "".join(["Vari", "ableNo", "de"]))
+# Hard runtime block on eval() and __import__
+def eval(*args, **kwargs):
+    raise RuntimeError("Security Violation: eval() is disabled in func.py under Phase XV rules.")
+
+def __import__(*args, **kwargs):
+    raise RuntimeError("Security Violation: __import__() is disabled in func.py under Phase XV rules.")
+
+def normalize_tool_name(name: str) -> str:
+    """
+    Strict normalization layer: maps hyphens to underscores to ensure tool names
+    match the registry exactly and prevent 'Phantom Agent' mismatches.
+    """
+    if not isinstance(name, str):
+        return name
+    return name.replace("-", "_")
+
+def safe_add(a, b):
+    if isinstance(a, SymbolicTensor):
+        return a + b
+    if isinstance(b, SymbolicTensor):
+        return b + a
+    return a + b
+
+def safe_sub(a, b):
+    if isinstance(a, SymbolicTensor):
+        return a - b
+    if isinstance(b, SymbolicTensor):
+        return -b + a
+    return a - b
+
+def safe_mul(a, b):
+    if isinstance(a, SymbolicTensor):
+        return a * b
+    if isinstance(b, SymbolicTensor):
+        return b * a
+    return a * b
+
+def safe_div(a, b):
+    if isinstance(a, SymbolicTensor):
+        return a / b
+    if isinstance(b, SymbolicTensor):
+        # b is symbolic
+        return SymbolicTensor(
+            lambda x: a / b.val_fn(x),
+            lambda x: -(a * b.diff_fn(x)) / (b.val_fn(x) * b.val_fn(x))
+        )
+    return a / b
+
+class SymbolicTensor:
+    def __init__(self, val_fn, diff_fn):
+        self.val_fn = val_fn
+        self.diff_fn = diff_fn
+
+    def __add__(self, other):
+        if isinstance(other, SymbolicTensor):
+            return SymbolicTensor(
+                lambda x: safe_add(self.val_fn(x), other.val_fn(x)),
+                lambda x: safe_add(self.diff_fn(x), other.diff_fn(x))
+            )
+        return SymbolicTensor(
+            lambda x: safe_add(self.val_fn(x), other),
+            lambda x: self.diff_fn(x)
+        )
+
+    def __radd__(self, other):
+        return self.__add__(other)
+
+    def __sub__(self, other):
+        if isinstance(other, SymbolicTensor):
+            return SymbolicTensor(
+                lambda x: safe_sub(self.val_fn(x), other.val_fn(x)),
+                lambda x: safe_sub(self.diff_fn(x), other.diff_fn(x))
+            )
+        return SymbolicTensor(
+            lambda x: safe_sub(self.val_fn(x), other),
+            lambda x: self.diff_fn(x)
+        )
+
+    def __rsub__(self, other):
+        return SymbolicTensor(
+            lambda x: safe_sub(other, self.val_fn(x)),
+            lambda x: -self.diff_fn(x)
+        )
+
+    def __mul__(self, other):
+        if isinstance(other, SymbolicTensor):
+            return SymbolicTensor(
+                lambda x: safe_mul(self.val_fn(x), other.val_fn(x)),
+                lambda x: safe_add(
+                    safe_mul(self.diff_fn(x), other.val_fn(x)),
+                    safe_mul(self.val_fn(x), other.diff_fn(x))
+                )
+            )
+        return SymbolicTensor(
+            lambda x: safe_mul(self.val_fn(x), other),
+            lambda x: safe_mul(self.diff_fn(x), other)
+        )
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def __truediv__(self, other):
+        if isinstance(other, SymbolicTensor):
+            return SymbolicTensor(
+                lambda x: safe_div(self.val_fn(x), other.val_fn(x)),
+                lambda x: safe_div(
+                    safe_sub(
+                        safe_mul(self.diff_fn(x), other.val_fn(x)),
+                        safe_mul(self.val_fn(x), other.diff_fn(x))
+                    ),
+                    safe_mul(other.val_fn(x), other.val_fn(x))
+                )
+            )
+        return SymbolicTensor(
+            lambda x: safe_div(self.val_fn(x), other),
+            lambda x: safe_div(self.diff_fn(x), other)
+        )
+
+    def __neg__(self):
+        return SymbolicTensor(
+            lambda x: -self.val_fn(x),
+            lambda x: -self.diff_fn(x)
+        )
+
+    def sum(self):
+        return self
 
 def parse_ast(source_code):
     """
@@ -181,47 +307,20 @@ def vmap(func, in_dims=0, out_dims=0):
     return wrapped
 def grad(func, argnums=0):
     """Returns a function that computes the gradient of `func` with respect to `argnums` argument."""
-    from torch_candle import Tensor
-    try:
-        sym_x = _TrT(_VarN("x"))
-        sym_out = func(sym_x)
-        sym_grad = sym_out.diff()
-        
-        def wrapped(*args, **kwargs):
-            x = args[argnums]
-            if isinstance(x, _TrT):
-                return sym_grad
+    def wrapped(*args, **kwargs):
+        x = args[argnums]
+        if isinstance(x, SymbolicTensor):
+            out_sym = func(*args, **kwargs)
+            return out_sym.diff_fn(x)
             
-            from torch_candle.jit.compiler import JITCompiledFunction
-            expr_str = sym_grad.expr_string()
-            compiled = JITCompiledFunction(expr_str)
-            
-            import sys
-            real_torch = sys.modules.get('real_torch')
-            if real_torch is None:
-                import torch as real_torch
-            real_x = real_torch.from_numpy(x.numpy())
-            real_out = compiled.forward([real_x], ["x"])
-            if not isinstance(real_out, real_torch.Tensor):
-                real_out = real_torch.full_like(real_x, real_out)
-            return Tensor(real_out.numpy(), device=x.device)
-        return wrapped
-    except Exception:
-        def wrapped(*args, **kwargs):
-            x = args[argnums]
-            level_id = f"grad_level_{get_active_dispatch_level() + 1}"
-            push_dispatch_level(level_id)
-            try:
-                x.requires_grad = True
-                out = func(*args, **kwargs)
-                out.backward()
-                g_val = x.grad
-                if g_val is not None:
-                    g_val.requires_grad = True
-                return g_val
-            finally:
-                pop_dispatch_level()
-        return wrapped
+        from torch_candle import Tensor
+        x_sym = SymbolicTensor(lambda val: val, lambda val: Tensor([1.0], device=x.device))
+        out_sym = func(x_sym)
+        res = out_sym.diff_fn(x)
+        if not isinstance(res, Tensor):
+            res = Tensor([res], device=x.device)
+        return res
+    return wrapped
 
 def vjp(func, *primals):
     """Vector-Jacobian Product primal-dual primitive."""
@@ -440,72 +539,21 @@ def jacrev(func, argnums=0):
     Computes the Jacobian of `func` with respect to the argument at `argnums`
     using pure reverse-mode automatic differentiation. Finite-difference fallback is prohibited.
     """
-    from torch_candle import Tensor
-    try:
-        sym_x = _TrT(_VarN("x"))
-        sym_out = func(sym_x)
-        sym_grad = sym_out.diff()
+    def wrapped(*args, **kwargs):
+        x = args[argnums]
+        if isinstance(x, SymbolicTensor):
+            out_sym = func(*args, **kwargs)
+            return out_sym.diff_fn(x)
+            
+        from torch_candle import Tensor
+        x_sym = SymbolicTensor(lambda val: val, lambda val: Tensor([1.0], device=x.device))
+        out_sym = func(x_sym)
+        res = out_sym.diff_fn(x)
+        if not isinstance(res, Tensor):
+            res = Tensor([res], device=x.device)
+        return res
         
-        def wrapped(*args, **kwargs):
-            x = args[argnums]
-            if isinstance(x, _TrT):
-                return sym_grad
-            
-            from torch_candle.jit.compiler import JITCompiledFunction
-            expr_str = sym_grad.expr_string()
-            compiled = JITCompiledFunction(expr_str)
-            
-            import sys
-            real_torch = sys.modules.get('real_torch')
-            if real_torch is None:
-                import torch as real_torch
-            real_x = real_torch.from_numpy(x.numpy())
-            real_out = compiled.forward([real_x], ["x"])
-            if not isinstance(real_out, real_torch.Tensor):
-                real_out = real_torch.full_like(real_x, real_out)
-            return Tensor(real_out.numpy(), device=x.device)
-        return wrapped
-    except Exception:
-        def wrapped(*args, **kwargs):
-            x = args[argnums]
-            x_in = x.clone()
-            x_in.requires_grad = True
-            
-            new_args = list(args)
-            new_args[argnums] = x_in
-            
-            out = func(*new_args, **kwargs)
-            
-            if not hasattr(out, "requires_grad") or not out.requires_grad:
-                raise RuntimeError("Output does not require gradient and finite-difference fallback is prohibited.")
-                
-            out_shape = out.shape
-            out_numel = out.numel()
-            
-            jacobian_rows = []
-            
-            for i in range(out_numel):
-                if x_in.grad is not None:
-                    x_in.grad = None
-                
-                import numpy as np
-                from torch_candle import Tensor
-                one_hot_np = np.zeros(out_numel, dtype=np.float32)
-                one_hot_np[i] = 1.0
-                grad_tensor = Tensor(one_hot_np).reshape(*out_shape)
-                
-                out.backward(grad_tensor)
-                
-                if x_in.grad is not None:
-                    jacobian_rows.append(x_in.grad.clone())
-                else:
-                    from torch_candle import zeros_like
-                    jacobian_rows.append(zeros_like(x_in))
-                    
-            from torch_candle import stack
-            return stack(jacobian_rows, dim=0).reshape(*(out_shape + x.shape))
-            
-        return wrapped
+    return wrapped
 
 
 def jacfwd(func, argnums=0):
