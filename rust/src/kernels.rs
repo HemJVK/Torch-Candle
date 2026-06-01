@@ -342,3 +342,84 @@ pub fn fast_adam_step(
             }
         });
 }
+
+pub fn fast_adamw_step(
+    mut param: ArrayViewMutD<'_, f32>,
+    grad: &[f32],
+    mut m: ArrayViewMutD<'_, f32>,
+    mut v: ArrayViewMutD<'_, f32>,
+    beta1: f32,
+    beta2: f32,
+    lr: f32,
+    wd: f32,
+    eps: f32,
+    step: i32
+) {
+    let p_data = param.as_slice_mut().expect("param must be contiguous");
+    let m_data = m.as_slice_mut().expect("m must be contiguous");
+    let v_data = v.as_slice_mut().expect("v must be contiguous");
+    
+    let (b1_vec, b2_vec, inv_b1_vec, inv_b2_vec, eps_vec, step_lr_vec, wd_lr_factor) = unsafe {
+        (
+            _mm256_set1_ps(beta1),
+            _mm256_set1_ps(beta2),
+            _mm256_set1_ps(1.0 - beta1),
+            _mm256_set1_ps(1.0 - beta2),
+            _mm256_set1_ps(eps),
+            _mm256_set1_ps(lr * (1.0 - beta2.powi(step)).sqrt() / (1.0 - beta1.powi(step))),
+            _mm256_set1_ps(1.0 - lr * wd),
+        )
+    };
+
+    p_data.par_chunks_mut(1024)
+        .zip(m_data.par_chunks_mut(1024))
+        .zip(v_data.par_chunks_mut(1024))
+        .enumerate()
+        .for_each(|(chunk_idx, ((p_chunk, m_chunk), v_chunk))| {
+            let offset = chunk_idx * 1024;
+            unsafe {
+                let mut i = 0;
+                while i + 8 <= p_chunk.len() {
+                    let g_ptr = grad.as_ptr().add(offset + i);
+                    let g_vec = _mm256_loadu_ps(g_ptr);
+                    
+                    let m_ptr = m_chunk.as_mut_ptr().add(i);
+                    let m_vec = _mm256_loadu_ps(m_ptr);
+                    
+                    let v_ptr = v_chunk.as_mut_ptr().add(i);
+                    let v_vec = _mm256_loadu_ps(v_ptr);
+                    
+                    // m = b1 * m + (1-b1) * g
+                    let m_new = _mm256_add_ps(_mm256_mul_ps(b1_vec, m_vec), _mm256_mul_ps(inv_b1_vec, g_vec));
+                    // v = b2 * v + (1-b2) * g*g
+                    let v_new = _mm256_add_ps(_mm256_mul_ps(b2_vec, v_vec), _mm256_mul_ps(inv_b2_vec, _mm256_mul_ps(g_vec, g_vec)));
+                    
+                    _mm256_storeu_ps(m_ptr, m_new);
+                    _mm256_storeu_ps(v_ptr, v_new);
+                    
+                    // Apply weight decay to parameter: p = p * (1 - lr * wd)
+                    let p_ptr = p_chunk.as_mut_ptr().add(i);
+                    let p_vec = _mm256_loadu_ps(p_ptr);
+                    let p_decayed = _mm256_mul_ps(p_vec, wd_lr_factor);
+                    
+                    // p -= lr_effective * m / (sqrt(v) + eps)
+                    let denom = _mm256_add_ps(_mm256_sqrt_ps(v_new), eps_vec);
+                    let delta = _mm256_mul_ps(step_lr_vec, _mm256_mul_ps(m_new, v_recip_ps(denom)));
+                    _mm256_storeu_ps(p_ptr, _mm256_sub_ps(p_decayed, delta));
+                    
+                    i += 8;
+                }
+                
+                let bias_corr1 = 1.0 - beta1.powi(step);
+                let bias_corr2 = 1.0 - beta2.powi(step);
+                let step_lr = lr * (bias_corr2.sqrt()) / bias_corr1;
+                let wd_factor = 1.0 - lr * wd;
+                for j in i..p_chunk.len() {
+                    let g = grad[offset + j];
+                    m_chunk[j] = beta1 * m_chunk[j] + (1.0 - beta1) * g;
+                    v_chunk[j] = beta2 * v_chunk[j] + (1.0 - beta2) * g * g;
+                    p_chunk[j] = p_chunk[j] * wd_factor - step_lr * m_chunk[j] / (v_chunk[j].sqrt() + eps);
+                }
+            }
+        });
+}

@@ -2,35 +2,26 @@ import os
 import pickle
 import torch_candle_backend as _kernels
 
-# Compile/load the C++ JIT extension dynamically using PyTorch cpp_extension
-JITCompiledFunction = None
-try:
-    import torch.utils.cpp_extension as cpp_extension
-    current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    csrc_dir = os.path.join(current_dir, "csrc")
-    cpp_file = os.path.join(csrc_dir, "jit_compiler.cpp")
-    
-    if os.path.exists(cpp_file):
-        # Prevent output noise during import
-        jit_cpp = cpp_extension.load(
-            name="torch_candle_cpp_jit",
-            sources=[cpp_file],
-            verbose=False
-        )
-        JITCompiledFunction = jit_cpp.JITCompiledFunction
-except Exception:
-    pass
+import torch
 
-# Fallback implementation if C++ JIT fails to compile
-if JITCompiledFunction is None:
-    class JITCompiledFunction:
-        def __init__(self, expr):
-            self.expr = expr
-        def forward(self, inputs, input_names):
-            env = {name: val for name, val in zip(input_names, inputs)}
-            return eval(self.expr, {"__builtins__": None}, env)
-        def backward(self, inputs, input_names, grad_output):
-            raise NotImplementedError("C++ JIT Autograd required for backward pass.")
+class JITCompiledFunction:
+    def __init__(self, expr):
+        self.expr = expr
+    def forward(self, inputs, input_names):
+        env = {name: val for name, val in zip(input_names, inputs)}
+        globals_dict = {
+            "__builtins__": None,
+            "sin": torch.sin,
+            "cos": torch.cos,
+            "exp": torch.exp,
+            "log": torch.log,
+            "sigmoid": torch.sigmoid,
+            "relu": torch.relu,
+            "tanh": torch.tanh,
+        }
+        return eval(self.expr, globals_dict, env)
+    def backward(self, inputs, input_names, grad_output):
+        raise NotImplementedError("C++ JIT Autograd required for backward pass.")
 
 
 class ScriptModule:

@@ -233,6 +233,25 @@ impl SPSCRingBuffer {
         layout.tail.val.store(tail.wrapping_add(1), Ordering::Release);
         Ok(task)
     }
+
+    unsafe fn __getbuffer__(
+        &self,
+        view: *mut pyo3::ffi::Py_buffer,
+        flags: std::os::raw::c_int,
+    ) -> PyResult<()> {
+        let size = std::mem::size_of::<SPSCRingBufferLayout>();
+        pyo3::ffi::PyBuffer_FillInfo(
+            view,
+            std::ptr::null_mut(),
+            self.raw_ptr as *mut std::ffi::c_void,
+            size as isize,
+            0,
+            flags,
+        );
+        Ok(())
+    }
+
+    unsafe fn __releasebuffer__(&self, _view: *mut pyo3::ffi::Py_buffer) {}
 }
 
 impl Drop for SPSCRingBuffer {

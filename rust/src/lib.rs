@@ -152,6 +152,28 @@ fn get_disable_ema_estimates(py: Python<'_>) -> bool {
     false
 }
 
+fn has_nan_or_inf(t: &Tensor) -> bool {
+    if let Ok(vec) = t.flatten_all().and_then(|x| x.to_vec1::<f32>()) {
+        for &val in &vec {
+            if val.is_nan() || val.is_infinite() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn save_python_grad_history(py: Python<'_>, param_id: usize, shape: Vec<usize>, data: Vec<f32>) {
+    if let Ok(tensor_mod) = py.import_bound("torch_candle") {
+        if let Ok(tensor_cls) = tensor_mod.getattr("Tensor") {
+            if let Ok(grad_history) = tensor_cls.getattr("_grad_history") {
+                let tuple = (shape, data);
+                let _ = grad_history.set_item(param_id, tuple);
+            }
+        }
+    }
+}
+
 // --- Autograd Infrastructure ---
 
 pub trait OpNode: Send + Sync {
@@ -712,9 +734,9 @@ impl PyTensor {
         Ok(array.to_pyarray_bound(py).into())
     }
 
-    #[staticmethod]
+    #[classmethod]
     #[pyo3(signature = (shape, device="cpu", dtype="float32"))]
-    fn ones(shape: Vec<usize>, device: &str, dtype: &str) -> PyResult<Self> {
+    fn ones(_cls: &Bound<'_, pyo3::types::PyType>, shape: Vec<usize>, device: &str, dtype: &str) -> PyResult<Self> {
         let dev = match device {
             "cpu" => Device::Cpu,
             "cuda" => Device::new_cuda(0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?,
@@ -729,9 +751,9 @@ impl PyTensor {
         Ok(PyTensor { inner, grad: None, grad_fn: None, requires_grad: false, parents: Vec::new() })
     }
 
-    #[staticmethod]
+    #[classmethod]
     #[pyo3(signature = (shape, device="cpu", dtype="float32"))]
-    fn zeros(shape: Vec<usize>, device: &str, dtype: &str) -> PyResult<Self> {
+    fn zeros(_cls: &Bound<'_, pyo3::types::PyType>, shape: Vec<usize>, device: &str, dtype: &str) -> PyResult<Self> {
         let dev = match device {
             "cpu" => Device::Cpu,
             "cuda" => Device::new_cuda(0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?,
@@ -746,8 +768,8 @@ impl PyTensor {
         Ok(PyTensor { inner, grad: None, grad_fn: None, requires_grad: false, parents: Vec::new() })
     }
 
-    #[staticmethod]
-    fn cat(tensors: Vec<PyTensor>, dim: usize) -> PyResult<Self> {
+    #[classmethod]
+    fn cat(_cls: &Bound<'_, pyo3::types::PyType>, tensors: Vec<PyTensor>, dim: usize) -> PyResult<Self> {
         let inners: Vec<Tensor> = tensors.iter().map(|t| t.inner.clone()).collect();
         let inner = Tensor::cat(&inners, dim).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
         
@@ -770,8 +792,8 @@ impl PyTensor {
         })
     }
 
-    #[staticmethod]
-    fn stack(tensors: Vec<PyTensor>, dim: usize) -> PyResult<Self> {
+    #[classmethod]
+    fn stack(_cls: &Bound<'_, pyo3::types::PyType>, tensors: Vec<PyTensor>, dim: usize) -> PyResult<Self> {
         let inners: Vec<Tensor> = tensors.iter().map(|t| t.inner.clone()).collect();
         let inner = Tensor::stack(&inners, dim).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
         
@@ -962,9 +984,9 @@ impl PyTensor {
         }
     }
 
-    #[staticmethod]
+    #[classmethod]
     #[allow(invalid_reference_casting)]
-    fn from_cuda_ipc_handle(handle_bytes: Vec<u8>, shape: Vec<usize>, dtype: String) -> PyResult<Self> {
+    fn from_cuda_ipc_handle(_cls: &Bound<'_, pyo3::types::PyType>, handle_bytes: Vec<u8>, shape: Vec<usize>, dtype: String) -> PyResult<Self> {
         let dev = Device::new_cuda(0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
         let dt = match dtype.as_str() {
             "float32" => DType::F32,
@@ -1038,7 +1060,7 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (py_param_id=None))]
-    fn retrieve_grad(&self, _py: Python<'_>, _py_param_id: Option<usize>) -> PyResult<Option<PyTensor>> {
+    fn retrieve_grad(&self, _py: Python<'_>, py_param_id: Option<usize>) -> PyResult<Option<PyTensor>> {
         if let Some(ref g_mutex) = self.grad {
             let g_opt = g_mutex.lock();
             if let Some(ref g) = *g_opt {
@@ -1327,8 +1349,8 @@ impl PyTensor {
         build_topo(self, &mut visited_ptrs, &mut topo_order);
         topo_order.reverse(); // Now it's from output to inputs
 
-        for tensor in topo_order {
-            let current_grad = {
+        for tensor in topo_order.clone() {
+            let mut current_grad = {
                 let g_mutex = tensor.grad.as_ref().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Tensor in topo order lacks grad Arc"))?;
                 let g_opt = g_mutex.lock();
                 match *g_opt {
@@ -1336,6 +1358,23 @@ impl PyTensor {
                     None => continue, // No gradient reached this node yet
                 }
             };
+
+            let enable_sha = get_python_enable_sha(_py);
+            let disable_ema = get_disable_ema_estimates(_py);
+            if enable_sha && !disable_ema && has_nan_or_inf(&current_grad) {
+                let param_id = Arc::as_ptr(tensor.grad.as_ref().unwrap()) as usize;
+                if let Some((shape, hist_data)) = get_python_grad_history(_py, param_id) {
+                    let beta = 0.9f32;
+                    let healed_data: Vec<f32> = hist_data.iter().map(|&x| x * beta).collect();
+                    if let Ok(healed_tensor) = Tensor::from_vec(healed_data, shape.as_slice(), current_grad.device()) {
+                        current_grad = healed_tensor;
+                        if let Some(ref g_mutex) = tensor.grad {
+                            let mut g_opt = g_mutex.lock();
+                            *g_opt = Some(current_grad.clone());
+                        }
+                    }
+                }
+            }
 
             if let Some(ref node) = tensor.grad_fn {
                 let parent_grads = node.backward(&current_grad);
@@ -1348,6 +1387,22 @@ impl PyTensor {
                             } else {
                                 *pg_opt = Some(p_grad);
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Save healthy gradients to history
+        for tensor in &topo_order {
+            if let Some(ref g_mutex) = tensor.grad {
+                let g_opt = g_mutex.lock();
+                if let Some(ref g) = *g_opt {
+                    if !has_nan_or_inf(g) {
+                        if let Ok(vec) = g.flatten_all().and_then(|x| x.to_vec1::<f32>()) {
+                            let shape = g.dims().to_vec();
+                            let param_id = Arc::as_ptr(g_mutex) as usize;
+                            save_python_grad_history(_py, param_id, shape, vec);
                         }
                     }
                 }
@@ -1702,9 +1757,9 @@ impl PyTensor {
 
     // --- Native Random tensor factories ---
 
-    #[staticmethod]
+    #[classmethod]
     #[pyo3(signature = (shape, device="cpu", dtype="float32"))]
-    fn randn(shape: Vec<usize>, device: &str, dtype: &str) -> PyResult<Self> {
+    fn randn(_cls: &Bound<'_, pyo3::types::PyType>, shape: Vec<usize>, device: &str, dtype: &str) -> PyResult<Self> {
         let dev = match device {
             "cuda" => Device::new_cuda(0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?,
             _ => Device::Cpu,
@@ -1717,9 +1772,9 @@ impl PyTensor {
         Ok(PyTensor { inner, grad: None, grad_fn: None, requires_grad: false, parents: Vec::new() })
     }
 
-    #[staticmethod]
+    #[classmethod]
     #[pyo3(signature = (shape, device="cpu", dtype="float32"))]
-    fn rand(shape: Vec<usize>, device: &str, dtype: &str) -> PyResult<Self> {
+    fn rand(_cls: &Bound<'_, pyo3::types::PyType>, shape: Vec<usize>, device: &str, dtype: &str) -> PyResult<Self> {
         let dev = match device {
             "cuda" => Device::new_cuda(0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?,
             _ => Device::Cpu,
@@ -1921,6 +1976,39 @@ fn fast_adam_step(
 }
 
 #[pyfunction]
+fn fast_adamw_step(
+    param: &Bound<'_, PyArrayDyn<f32>>,
+    grad: &Bound<'_, PyArrayDyn<f32>>,
+    m: &Bound<'_, PyArrayDyn<f32>>,
+    v: &Bound<'_, PyArrayDyn<f32>>,
+    beta1: f32,
+    beta2: f32,
+    lr: f32,
+    wd: f32,
+    eps: f32,
+    step: i32,
+) -> PyResult<()> {
+    increment_kernel_call_count();
+    let mut p_mut = unsafe { param.as_array_mut() };
+    let g_slice = unsafe { grad.as_slice()? };
+    let mut m_mut = unsafe { m.as_array_mut() };
+    let mut v_mut = unsafe { v.as_array_mut() };
+    kernels::fast_adamw_step(
+        p_mut.view_mut(),
+        g_slice,
+        m_mut.view_mut(),
+        v_mut.view_mut(),
+        beta1,
+        beta2,
+        lr,
+        wd,
+        eps,
+        step,
+    );
+    Ok(())
+}
+
+#[pyfunction]
 fn vectorized_forward(
     state: std::collections::HashMap<String, PyTensor>,
     inputs: &PyTensor
@@ -1996,8 +2084,8 @@ pub struct PyDispatchRegistry;
 
 #[pymethods]
 impl PyDispatchRegistry {
-    #[staticmethod]
-    pub fn register_backend(backend_name: String) -> PyResult<()> {
+    #[classmethod]
+    pub fn register_backend(_cls: &Bound<'_, pyo3::types::PyType>, backend_name: String) -> PyResult<()> {
         let name_lower = backend_name.to_lowercase();
         if name_lower == "rocm" || name_lower == "hip" {
             println!("🚀 [DispatchRegistry] Integrating AMD ROCm/HIP optimization pathways inside backend: {}", backend_name);
@@ -2007,8 +2095,8 @@ impl PyDispatchRegistry {
         Ok(())
     }
 
-    #[staticmethod]
-    pub fn register_kernel(op_name: String, backend_name: String, kernel: PyObject) -> PyResult<()> {
+    #[classmethod]
+    pub fn register_kernel(_cls: &Bound<'_, pyo3::types::PyType>, op_name: String, backend_name: String, kernel: PyObject) -> PyResult<()> {
         let registry = get_dispatch_registry();
         let mut kernels = registry.kernels.write();
         let op_entry = kernels.entry(op_name.clone()).or_insert_with(HashMap::new);
@@ -2017,8 +2105,8 @@ impl PyDispatchRegistry {
         Ok(())
     }
 
-    #[staticmethod]
-    pub fn dispatch(op_name: String, backend_name: String, py: Python<'_>, args: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<PyObject> {
+    #[classmethod]
+    pub fn dispatch(_cls: &Bound<'_, pyo3::types::PyType>, op_name: String, backend_name: String, py: Python<'_>, args: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<PyObject> {
         increment_kernel_call_count();
         let registry = get_dispatch_registry();
         let kernels = registry.kernels.read();
@@ -2081,8 +2169,8 @@ pub struct VmapDispatcher;
 
 #[pymethods]
 impl VmapDispatcher {
-    #[staticmethod]
-    pub fn vectorized_forward(tensors: Vec<PyTensor>, op_name: String) -> PyResult<PyTensor> {
+    #[classmethod]
+    pub fn vectorized_forward(_cls: &Bound<'_, pyo3::types::PyType>, tensors: Vec<PyTensor>, op_name: String) -> PyResult<PyTensor> {
         if tensors.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("No tensors to vectorize"));
         }
@@ -2181,7 +2269,6 @@ fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<jit::SSABlock>()?;
     m.add_class::<jit::SSACompiler>()?;
     m.add_class::<jit::NativeASTParser>()?;
-    m.add_class::<jit::NativeSym>()?;
     m.add_class::<PyDispatchRegistry>()?;
     m.add_class::<VmapDispatcher>()?;
 
@@ -2193,6 +2280,7 @@ fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fast_softmax, m)?)?;
     m.add_function(wrap_pyfunction!(fast_layer_norm, m)?)?;
     m.add_function(wrap_pyfunction!(fast_adam_step, m)?)?;
+    m.add_function(wrap_pyfunction!(fast_adamw_step, m)?)?;
     m.add_function(wrap_pyfunction!(vectorized_forward, m)?)?;
     m.add_function(wrap_pyfunction!(set_enable_sha, m)?)?;
     m.add_function(wrap_pyfunction!(get_enable_sha, m)?)?;

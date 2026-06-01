@@ -29,6 +29,8 @@ class AdamW(Optimizer):
         if closure is not None:
             loss = closure()
 
+        import torch_candle_backend as _kernels
+
         for group in self.param_groups:
             lr = group['lr']
             beta1, beta2 = group['betas']
@@ -56,34 +58,31 @@ class AdamW(Optimizer):
                 exp_avg = state['exp_avg']
                 exp_avg_sq = state['exp_avg_sq']
                 
-                # Decoupled weight decay applied in-place!
+                # Retrieve the underlying numpy arrays for parameter, grad, exp_avg, and exp_avg_sq
+                p_arr = p.numpy()
+                g_arr = grad.numpy()
+                m_arr = exp_avg.numpy()
+                v_arr = exp_avg_sq.numpy()
+                
+                # Perform the SIMD-accelerated zero-allocation updates directly in Rust
+                _kernels.fast_adamw_step(
+                    p_arr,
+                    g_arr,
+                    m_arr,
+                    v_arr,
+                    beta1,
+                    beta2,
+                    lr,
+                    weight_decay,
+                    eps,
+                    t
+                )
+                
+                # Update the underlying PyTensor handles with the mutated values
                 from .. import no_grad
                 with no_grad():
-                    if weight_decay != 0:
-                        decay_factor = 1.0 - lr * weight_decay
-                        p *= decay_factor
-                
-                # Update biased first moment estimates in-place
-                exp_avg *= beta1
-                exp_avg += grad * (1.0 - beta1)
-                
-                # Update biased second moment estimates in-place
-                exp_avg_sq *= beta2
-                exp_avg_sq += (grad * grad) * (1.0 - beta2)
-                
-                # Bias-corrected estimates
-                bias_correction1 = 1.0 - beta1 ** t
-                bias_correction2 = 1.0 - beta2 ** t
-                
-                step_size = lr * math.sqrt(bias_correction2) / bias_correction1
-                
-                # Compute denominator: sqrt(exp_avg_sq) + eps
-                denom = exp_avg_sq.sqrt()
-                denom += eps
-                
-                with no_grad():
-                    # Apply update in-place!
-                    update = exp_avg * (step_size / denom)
-                    p -= update
+                    p._tensor = _kernels.PyTensor(p_arr, device=p.device)
+                    exp_avg._tensor = _kernels.PyTensor(m_arr, device=p.device)
+                    exp_avg_sq._tensor = _kernels.PyTensor(v_arr, device=p.device)
 
         return loss

@@ -42,6 +42,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub struct StreamAwareAllocator {
     blocks: Mutex<HashMap<usize, AllocationBlock>>,
     event_queue: Mutex<VecDeque<StreamEvent>>,
+    free_queue: Mutex<VecDeque<(StreamEvent, usize)>>,
     next_ptr: Mutex<usize>,
     next_event_id: Mutex<u32>,
     pub stream_head: AtomicUsize,
@@ -51,6 +52,24 @@ pub struct StreamAwareAllocator {
     condvar_mutex: Mutex<()>,
 }
 
+impl StreamAwareAllocator {
+    fn process_delayed_frees_internal(&self, blocks: &mut HashMap<usize, AllocationBlock>) {
+        let mut free_queue = self.free_queue.lock().unwrap();
+        let mut remaining = VecDeque::new();
+        while let Some((event, ptr)) = free_queue.pop_front() {
+            if event.query() {
+                if let Some(block) = blocks.get_mut(&ptr) {
+                    block.is_idle = true;
+                    println!("🚀 [StreamAwareAllocator] delayed_free: Block 0x{:x} is now idle (event completed)", ptr);
+                }
+            } else {
+                remaining.push_back((event, ptr));
+            }
+        }
+        *free_queue = remaining;
+    }
+}
+
 #[pymethods]
 impl StreamAwareAllocator {
     #[new]
@@ -58,6 +77,7 @@ impl StreamAwareAllocator {
         Self {
             blocks: Mutex::new(HashMap::new()),
             event_queue: Mutex::new(VecDeque::new()),
+            free_queue: Mutex::new(VecDeque::new()),
             next_ptr: Mutex::new(1000000),
             next_event_id: Mutex::new(1),
             stream_head: AtomicUsize::new(0),
@@ -68,8 +88,16 @@ impl StreamAwareAllocator {
         }
     }
 
+    pub fn process_delayed_frees(&self) -> PyResult<()> {
+        let mut blocks = self.blocks.lock().unwrap();
+        self.process_delayed_frees_internal(&mut blocks);
+        Ok(())
+    }
+
     pub fn allocate(&self, size: usize, stream_id: u32, tag: String) -> PyResult<usize> {
         let mut blocks = self.blocks.lock().unwrap();
+        self.process_delayed_frees_internal(&mut blocks);
+        
         // Updated to support cross-stream/cross-tag reuse (Stream-Aware Allocation)
         for block in blocks.values_mut() {
             if block.is_idle && block.size >= size {
@@ -100,7 +128,6 @@ impl StreamAwareAllocator {
     }
 
     pub fn free(&self, ptr: usize, stream_id: u32) -> PyResult<()> {
-        let mut event_queue = self.event_queue.lock().unwrap();
         let mut next_event_id = self.next_event_id.lock().unwrap();
         
         let event_id = *next_event_id;
@@ -111,13 +138,11 @@ impl StreamAwareAllocator {
             event_id,
             is_complete: false,
         };
-        event_queue.push_back(event);
         
-        let mut blocks = self.blocks.lock().unwrap();
-        if let Some(block) = blocks.get_mut(&ptr) {
-            block.is_idle = true;
-            println!("🚀 [StreamAwareAllocator] free: User-level deletion of pointer address 0x{:x} (stream {})", ptr, stream_id);
-        }
+        let mut free_queue = self.free_queue.lock().unwrap();
+        free_queue.push_back((event, ptr));
+        
+        println!("🚀 [StreamAwareAllocator] free: Queued pointer address 0x{:x} for delayed deletion on stream {}", ptr, stream_id);
         
         Ok(())
     }
