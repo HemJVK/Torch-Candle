@@ -1,73 +1,16 @@
 import torch_candle_backend as _kernels
 from torch_candle_backend import VmapDispatcher
 
-class Sym:
-    def __init__(self, expr):
-        self.expr = expr
-        
-    def __add__(self, other):
-        if not isinstance(other, Sym):
-            other = Sym(('const', other))
-        return Sym(('add', self, other))
-        
-    def __radd__(self, other):
-        return Sym(('const', other)) + self
-        
-    def __sub__(self, other):
-        if not isinstance(other, Sym):
-            other = Sym(('const', other))
-        return Sym(('sub', self, other))
-        
-    def __rsub__(self, other):
-        return Sym(('const', other)) - self
-        
-    def __mul__(self, other):
-        if not isinstance(other, Sym):
-            other = Sym(('const', other))
-        return Sym(('mul', self, other))
-        
-    def __rmul__(self, other):
-        return Sym(('const', other)) * self
-        
-    def __pow__(self, other):
-        return Sym(('pow', self, other))
-
-def diff_sym(sym, var='x'):
-    op = sym.expr[0]
-    if op == 'var':
-        if sym.expr[1] == var:
-            return Sym(('const', 1.0))
-        else:
-            return Sym(('const', 0.0))
-    elif op == 'const':
-        return Sym(('const', 0.0))
-    elif op == 'add':
-        return diff_sym(sym.expr[1], var) + diff_sym(sym.expr[2], var)
-    elif op == 'sub':
-        return diff_sym(sym.expr[1], var) - diff_sym(sym.expr[2], var)
-    elif op == 'mul':
-        u, v = sym.expr[1], sym.expr[2]
-        return u * diff_sym(v, var) + v * diff_sym(u, var)
-    elif op == 'pow':
-        u, n = sym.expr[1], sym.expr[2]
-        return Sym(('const', n)) * (u ** (n - 1)) * diff_sym(u, var)
-    else:
-        raise NotImplementedError(f"Unsupported operation in symbolic differentiation: {op}")
-
-def eval_sym(sym, env):
-    op = sym.expr[0]
-    if op == 'var':
-        return env[sym.expr[1]]
-    elif op == 'const':
-        return sym.expr[1]
-    elif op == 'add':
-        return eval_sym(sym.expr[1], env) + eval_sym(sym.expr[2], env)
-    elif op == 'sub':
-        return eval_sym(sym.expr[1], env) - eval_sym(sym.expr[2], env)
-    elif op == 'mul':
-        return eval_sym(sym.expr[1], env) * eval_sym(sym.expr[2], env)
-    elif op == 'pow':
-        return eval_sym(sym.expr[1], env) ** sym.expr[2]
+def parse_ast(source_code):
+    """
+    STRICT PROHIBITION: Python-level AST/Sym parsing is terminated.
+    All symbolic logic must be offloaded to the Rust/C++ backend
+    to eliminate O(n) serialization tax and L1 cache pollution.
+    """
+    raise RuntimeError(
+        "ARCHITECTURAL VIOLATION: Native AST required. "
+        "Python-level parsing is prohibited in Phase XI."
+    )
 
 def stack(tensors, dim=0):
     from torch_candle import stack as raw_stack
@@ -232,15 +175,17 @@ def vmap(func, in_dims=0, out_dims=0):
 
 def grad(func, argnums=0):
     """Returns a function that computes the gradient of `func` with respect to `argnums` argument."""
+    from torch_candle import Tensor
     try:
-        sym_x = Sym(('var', 'x'))
+        sym_x = _kernels.NativeSym()
         sym_out = func(sym_x)
-        sym_grad = diff_sym(sym_out, 'x')
+        sym_grad = sym_out.diff()
         
         def wrapped(*args, **kwargs):
             x = args[argnums]
-            env = {'x': x}
-            return eval_sym(sym_grad, env)
+            x_tensor = x._tensor if isinstance(x, Tensor) else x
+            res_pytensor = sym_grad.eval(x_tensor)
+            return Tensor._fast_wrap(res_pytensor)
         return wrapped
     except Exception:
         def wrapped(*args, **kwargs):
@@ -476,15 +421,17 @@ def jacrev(func, argnums=0):
     Computes the Jacobian of `func` with respect to the argument at `argnums`
     using pure reverse-mode automatic differentiation. Finite-difference fallback is prohibited.
     """
+    from torch_candle import Tensor
     try:
-        sym_x = Sym(('var', 'x'))
+        sym_x = _kernels.NativeSym()
         sym_out = func(sym_x)
-        sym_grad = diff_sym(sym_out, 'x')
+        sym_grad = sym_out.diff()
         
         def wrapped(*args, **kwargs):
             x = args[argnums]
-            env = {'x': x}
-            return eval_sym(sym_grad, env)
+            x_tensor = x._tensor if isinstance(x, Tensor) else x
+            res_pytensor = sym_grad.eval(x_tensor)
+            return Tensor._fast_wrap(res_pytensor)
         return wrapped
     except Exception:
         def wrapped(*args, **kwargs):

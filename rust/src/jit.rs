@@ -528,3 +528,209 @@ impl NativeASTParser {
         parse_to_ssa(&expr, compiler)
     }
 }
+
+#[derive(Clone, Debug)]
+pub enum SymExpr {
+    Var,
+    Const(f64),
+    Add(Box<SymExpr>, Box<SymExpr>),
+    Sub(Box<SymExpr>, Box<SymExpr>),
+    Mul(Box<SymExpr>, Box<SymExpr>),
+    Pow(Box<SymExpr>, f64),
+}
+
+impl SymExpr {
+    fn diff(&self) -> Self {
+        match self {
+            SymExpr::Var => SymExpr::Const(1.0),
+            SymExpr::Const(_) => SymExpr::Const(0.0),
+            SymExpr::Add(left, right) => {
+                SymExpr::Add(Box::new(left.diff()), Box::new(right.diff()))
+            }
+            SymExpr::Sub(left, right) => {
+                SymExpr::Sub(Box::new(left.diff()), Box::new(right.diff()))
+            }
+            SymExpr::Mul(left, right) => {
+                SymExpr::Add(
+                    Box::new(SymExpr::Mul(left.clone(), Box::new(right.diff()))),
+                    Box::new(SymExpr::Mul(right.clone(), Box::new(left.diff()))),
+                )
+            }
+            SymExpr::Pow(left, n) => {
+                SymExpr::Mul(
+                    Box::new(SymExpr::Mul(
+                        Box::new(SymExpr::Const(*n)),
+                        Box::new(SymExpr::Pow(left.clone(), n - 1.0)),
+                    )),
+                    Box::new(left.diff()),
+                )
+            }
+        }
+    }
+
+    fn eval(&self, val: &crate::PyTensor) -> PyResult<crate::PyTensor> {
+        match self {
+            SymExpr::Var => Ok(val.clone()),
+            SymExpr::Const(c) => {
+                let inner = candle_core::Tensor::new(&[*c as f32], val.inner.device())
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+                Ok(crate::PyTensor {
+                    inner,
+                    grad: None,
+                    grad_fn: None,
+                    requires_grad: false,
+                    parents: Vec::new(),
+                })
+            }
+            SymExpr::Add(left, right) => {
+                let l = left.eval(val)?;
+                let r = right.eval(val)?;
+                l.add(&r)
+            }
+            SymExpr::Sub(left, right) => {
+                let l = left.eval(val)?;
+                let r = right.eval(val)?;
+                l.sub(&r)
+            }
+            SymExpr::Mul(left, right) => {
+                let l = left.eval(val)?;
+                let r = right.eval(val)?;
+                l.mul(&r)
+            }
+            SymExpr::Pow(left, n) => {
+                let l = left.eval(val)?;
+                l.pow(*n)
+            }
+        }
+    }
+
+    fn substitute(&self, replacement: &SymExpr) -> Self {
+        match self {
+            SymExpr::Var => replacement.clone(),
+            SymExpr::Const(c) => SymExpr::Const(*c),
+            SymExpr::Add(left, right) => {
+                SymExpr::Add(
+                    Box::new(left.substitute(replacement)),
+                    Box::new(right.substitute(replacement)),
+                )
+            }
+            SymExpr::Sub(left, right) => {
+                SymExpr::Sub(
+                    Box::new(left.substitute(replacement)),
+                    Box::new(right.substitute(replacement)),
+                )
+            }
+            SymExpr::Mul(left, right) => {
+                SymExpr::Mul(
+                    Box::new(left.substitute(replacement)),
+                    Box::new(right.substitute(replacement)),
+                )
+            }
+            SymExpr::Pow(left, n) => {
+                SymExpr::Pow(Box::new(left.substitute(replacement)), *n)
+            }
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone, Debug)]
+pub struct NativeSym {
+    pub expr: SymExpr,
+}
+
+#[pymethods]
+impl NativeSym {
+    #[new]
+    #[pyo3(signature = (val=None))]
+    fn new(val: Option<f64>) -> Self {
+        if let Some(v) = val {
+            Self { expr: SymExpr::Const(v) }
+        } else {
+            Self { expr: SymExpr::Var }
+        }
+    }
+
+    fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let other_expr = if let Ok(other_sym) = other.extract::<NativeSym>() {
+            other_sym.expr
+        } else if let Ok(other_val) = other.extract::<f64>() {
+            SymExpr::Const(other_val)
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Expected NativeSym or float"));
+        };
+        Ok(Self {
+            expr: SymExpr::Add(Box::new(self.expr.clone()), Box::new(other_expr)),
+        })
+    }
+
+    fn __radd__(&self, other: f64) -> Self {
+        Self {
+            expr: SymExpr::Add(Box::new(SymExpr::Const(other)), Box::new(self.expr.clone())),
+        }
+    }
+
+    fn __sub__(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let other_expr = if let Ok(other_sym) = other.extract::<NativeSym>() {
+            other_sym.expr
+        } else if let Ok(other_val) = other.extract::<f64>() {
+            SymExpr::Const(other_val)
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Expected NativeSym or float"));
+        };
+        Ok(Self {
+            expr: SymExpr::Sub(Box::new(self.expr.clone()), Box::new(other_expr)),
+        })
+    }
+
+    fn __rsub__(&self, other: f64) -> Self {
+        Self {
+            expr: SymExpr::Sub(Box::new(SymExpr::Const(other)), Box::new(self.expr.clone())),
+        }
+    }
+
+    fn __mul__(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let other_expr = if let Ok(other_sym) = other.extract::<NativeSym>() {
+            other_sym.expr
+        } else if let Ok(other_val) = other.extract::<f64>() {
+            SymExpr::Const(other_val)
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Expected NativeSym or float"));
+        };
+        Ok(Self {
+            expr: SymExpr::Mul(Box::new(self.expr.clone()), Box::new(other_expr)),
+        })
+    }
+
+    fn __rmul__(&self, other: f64) -> Self {
+        Self {
+            expr: SymExpr::Mul(Box::new(SymExpr::Const(other)), Box::new(self.expr.clone())),
+        }
+    }
+
+    fn __pow__(&self, other: f64, _modulo: Option<f64>) -> Self {
+        Self {
+            expr: SymExpr::Pow(Box::new(self.expr.clone()), other),
+        }
+    }
+
+    fn diff(&self) -> Self {
+        Self {
+            expr: self.expr.diff(),
+        }
+    }
+
+    fn eval(&self, val: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+        let py = val.py();
+        if let Ok(py_tensor) = val.extract::<crate::PyTensor>() {
+            let res = self.expr.eval(&py_tensor)?;
+            Ok(res.into_py(py))
+        } else if let Ok(other_sym) = val.extract::<NativeSym>() {
+            let res = self.expr.substitute(&other_sym.expr);
+            let res_sym = NativeSym { expr: res };
+            Ok(res_sym.into_py(py))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Expected PyTensor or NativeSym"))
+        }
+    }
+}

@@ -2168,6 +2168,7 @@ fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<jit::SSABlock>()?;
     m.add_class::<jit::SSACompiler>()?;
     m.add_class::<jit::NativeASTParser>()?;
+    m.add_class::<jit::NativeSym>()?;
     m.add_class::<PyDispatchRegistry>()?;
     m.add_class::<VmapDispatcher>()?;
 

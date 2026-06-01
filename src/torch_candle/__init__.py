@@ -135,22 +135,6 @@ class HardValidationFailure(Exception):
     """
     pass
 
-class HardFail(Exception):
-    """
-    Raised by the DTS Brain logic gate when a payload contains TrackedTensor signatures
-    or Python-level AD tapes.
-    """
-    pass
-
-class DTSBrain:
-    """
-    Simulates the Azure DTS Brain logic gate to block non-native execution profiles.
-    """
-    @staticmethod
-    def verify_payload(payload: str):
-        if "TrackedTensor" in payload or "python_ad_tape" in payload:
-            raise HardFail("DTS Brain intercepted non-native execution profile containing TrackedTensor or Python-level AD tape.")
-
 class ZeroToolCallGuard:
     """
     Middleware guard to verify that the agent execution actually invoked tools in the sandbox
