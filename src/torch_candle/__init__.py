@@ -1,8 +1,6 @@
 import numpy as np
 import math
 
-from . import ctypes_mmap
-
 import torch_candle_backend as _kernels
 
 from .tensor import Tensor
@@ -76,7 +74,6 @@ except ImportError:
 
 try:
     from .ast_parser import RustASTParser
-    from .ctypes_mmap import CtypesMmapOptimizer
     from torch_candle_backend import NativeASTParser, VmapDispatcher
 except ImportError:
     pass

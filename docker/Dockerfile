@@ -6,6 +6,7 @@ FROM nvidia/cuda:12.1.1-devel-ubuntu22.04 AS builder
 
 # Prevent interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
+ENV MALLOC_MMAP_THRESHOLD_=65536
 
 # Install core build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -41,6 +42,7 @@ RUN python3 -m venv .venv && \
 FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04 AS runner
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV MALLOC_MMAP_THRESHOLD_=65536
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -134,9 +134,20 @@ impl SPSCRingBuffer {
         let tail = layout.tail.val.load(Ordering::Relaxed);
         
         py.allow_threads(|| {
-            let mut guard = self.condvar_mutex.lock().unwrap();
+            let start = std::time::Instant::now();
             while layout.head.val.load(Ordering::Acquire) == tail {
-                guard = self.condvar.wait(guard).unwrap();
+                let elapsed = start.elapsed();
+                if elapsed.as_micros() < 50 {
+                    std::hint::spin_loop();
+                } else if elapsed.as_micros() < 1000 {
+                    std::thread::yield_now();
+                } else {
+                    let mut guard = self.condvar_mutex.lock().unwrap();
+                    while layout.head.val.load(Ordering::Acquire) == tail {
+                        guard = self.condvar.wait(guard).unwrap();
+                    }
+                    break;
+                }
             }
             Ok::<(), PyErr>(())
         })?;

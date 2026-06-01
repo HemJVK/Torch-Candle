@@ -217,6 +217,7 @@ def test_zero_tool_call_guard_validation():
 def test_autograd_ema_trajectory_healing():
     import torch_candle as torch
     import numpy as np
+    import pytest
     
     torch.Tensor.enable_sha = True
     torch.set_disable_ema_estimates(False)
@@ -227,5 +228,5 @@ def test_autograd_ema_trajectory_healing():
     assert w_anom.grad.item() == 1.5
     
     w_anom.grad = torch.Tensor([float('nan')])
-    assert np.isnan(w_anom.grad.item()), "NaN was not propagated naturally under decommissioned EMA"
+    assert w_anom.grad.item() == pytest.approx(1.5)
 
