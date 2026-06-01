@@ -58,18 +58,12 @@ class AdamW(Optimizer):
                 exp_avg = state['exp_avg']
                 exp_avg_sq = state['exp_avg_sq']
                 
-                # Retrieve the underlying numpy arrays for parameter, grad, exp_avg, and exp_avg_sq
-                p_arr = p.numpy()
-                g_arr = grad.numpy()
-                m_arr = exp_avg.numpy()
-                v_arr = exp_avg_sq.numpy()
-                
-                # Perform the SIMD-accelerated zero-allocation updates directly in Rust
+                # Perform the zero-allocation native updates directly in-place in Rust
                 _kernels.fast_adamw_step(
-                    p_arr,
-                    g_arr,
-                    m_arr,
-                    v_arr,
+                    p._tensor,
+                    grad._tensor,
+                    exp_avg._tensor,
+                    exp_avg_sq._tensor,
                     beta1,
                     beta2,
                     lr,
@@ -77,12 +71,5 @@ class AdamW(Optimizer):
                     eps,
                     t
                 )
-                
-                # Update the underlying PyTensor handles with the mutated values
-                from .. import no_grad
-                with no_grad():
-                    p._tensor = _kernels.PyTensor(p_arr, device=p.device)
-                    exp_avg._tensor = _kernels.PyTensor(m_arr, device=p.device)
-                    exp_avg_sq._tensor = _kernels.PyTensor(v_arr, device=p.device)
 
         return loss

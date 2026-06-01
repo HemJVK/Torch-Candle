@@ -7,6 +7,14 @@ def enable_torch_compat():
     Python's active system module registry. Any subsequent imports of `torch`
     will automatically resolve to `torch_candle`!
     """
+    # Save real PyTorch in registry before overriding
+    if 'real_torch' not in sys.modules:
+        try:
+            import importlib
+            sys.modules['real_torch'] = importlib.import_module('torch')
+        except ImportError:
+            pass
+
     # Expose core modules
     sys.modules['torch'] = torch_candle
     

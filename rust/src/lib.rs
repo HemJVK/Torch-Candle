@@ -707,6 +707,22 @@ impl PyTensor {
         })
     }
 
+    #[pyo3(signature = (func_name, *args, **kwargs))]
+    fn __torch_dispatch__(
+        &self,
+        py: Python<'_>,
+        func_name: &str,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<PyObject> {
+        let self_bound = Bound::new(py, self.clone())?;
+        if let Ok(method) = self_bound.getattr(func_name) {
+            method.call(args, kwargs).map(|b| b.unbind())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(format!("No such method on PyTensor: {}", func_name)))
+        }
+    }
+
     #[getter]
     fn shape(&self) -> Vec<usize> {
         self.inner.dims().to_vec()
@@ -1977,10 +1993,10 @@ fn fast_adam_step(
 
 #[pyfunction]
 fn fast_adamw_step(
-    param: &Bound<'_, PyArrayDyn<f32>>,
-    grad: &Bound<'_, PyArrayDyn<f32>>,
-    m: &Bound<'_, PyArrayDyn<f32>>,
-    v: &Bound<'_, PyArrayDyn<f32>>,
+    param: &Bound<'_, PyTensor>,
+    grad: &Bound<'_, PyTensor>,
+    m: &Bound<'_, PyTensor>,
+    v: &Bound<'_, PyTensor>,
     beta1: f32,
     beta2: f32,
     lr: f32,
@@ -1989,22 +2005,68 @@ fn fast_adamw_step(
     step: i32,
 ) -> PyResult<()> {
     increment_kernel_call_count();
-    let mut p_mut = unsafe { param.as_array_mut() };
-    let g_slice = unsafe { grad.as_slice()? };
-    let mut m_mut = unsafe { m.as_array_mut() };
-    let mut v_mut = unsafe { v.as_array_mut() };
-    kernels::fast_adamw_step(
-        p_mut.view_mut(),
-        g_slice,
-        m_mut.view_mut(),
-        v_mut.view_mut(),
-        beta1,
-        beta2,
-        lr,
-        wd,
-        eps,
-        step,
-    );
+    let mut p = param.try_borrow_mut()?;
+    let g = grad.try_borrow()?;
+    let mut m_ref = m.try_borrow_mut()?;
+    let mut v_ref = v.try_borrow_mut()?;
+
+    let dev = p.inner.device();
+    let g_aligned = if format!("{:?}", g.inner.device()) != format!("{:?}", dev) {
+        g.inner.to_device(dev).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+    } else {
+        g.inner.clone()
+    };
+    let m_aligned = if format!("{:?}", m_ref.inner.device()) != format!("{:?}", dev) {
+        m_ref.inner.to_device(dev).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+    } else {
+        m_ref.inner.clone()
+    };
+    let v_aligned = if format!("{:?}", v_ref.inner.device()) != format!("{:?}", dev) {
+        v_ref.inner.to_device(dev).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+    } else {
+        v_ref.inner.clone()
+    };
+
+    let wd_factor = 1.0 - lr * wd;
+    let mut new_p = if wd != 0.0 {
+        p.inner.affine(wd_factor as f64, 0.0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+    } else {
+        p.inner.clone()
+    };
+
+    let new_m = {
+        let term1 = m_aligned.affine(beta1 as f64, 0.0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let term2 = g_aligned.affine((1.0 - beta1) as f64, 0.0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        term1.broadcast_add(&term2).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+    };
+
+    let new_v = {
+        let term1 = v_aligned.affine(beta2 as f64, 0.0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let g_sq = g_aligned.broadcast_mul(&g_aligned).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let term2 = g_sq.affine((1.0 - beta2) as f64, 0.0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        term1.broadcast_add(&term2).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+    };
+
+    let bias_corr1 = 1.0 - beta1.powi(step);
+    let bias_corr2 = 1.0 - beta2.powi(step);
+    let step_size = lr * bias_corr2.sqrt() / bias_corr1;
+
+    let denom = {
+        let v_sqrt = new_v.sqrt().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        v_sqrt.affine(1.0, eps as f64).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+    };
+
+    let update = {
+        let m_scaled = new_m.affine(step_size as f64, 0.0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        m_scaled.broadcast_div(&denom).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+    };
+
+    new_p = new_p.broadcast_sub(&update).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+
+    p.inner = new_p;
+    m_ref.inner = new_m;
+    v_ref.inner = new_v;
+
     Ok(())
 }
 
