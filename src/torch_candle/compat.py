@@ -9,11 +9,14 @@ def enable_torch_compat():
     """
     # Save real PyTorch in registry before overriding
     if 'real_torch' not in sys.modules:
-        try:
-            import importlib
-            sys.modules['real_torch'] = importlib.import_module('torch')
-        except ImportError:
-            pass
+        if 'torch' in sys.modules and sys.modules['torch'] is not torch_candle:
+            sys.modules['real_torch'] = sys.modules['torch']
+        else:
+            try:
+                import importlib
+                sys.modules['real_torch'] = importlib.import_module('torch')
+            except ImportError:
+                pass
 
     # Expose core modules
     sys.modules['torch'] = torch_candle

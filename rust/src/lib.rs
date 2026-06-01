@@ -70,6 +70,205 @@ thread_local! {
     static KERNEL_CALL_COUNT: std::cell::Cell<usize> = std::cell::Cell::new(0);
 }
 
+thread_local! {
+    pub static AD_REGISTRY: RefCell<HashMap<(candle_core::TensorId, usize), AdNodeData>> = RefCell::new(HashMap::new());
+    pub static ACTIVE_AD_LEVEL: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    pub static SUSPENDED_LEVELS: std::cell::Cell<u8> = std::cell::Cell::new(0);
+}
+
+#[derive(Clone)]
+pub struct AdNodeData {
+    pub val: PyTensor,
+    pub diff: PyTensor,
+    pub vmap_level: Option<usize>,
+}
+
+#[pyfunction]
+fn enter_ad_level() {
+    ACTIVE_AD_LEVEL.with(|lvl| lvl.set(lvl.get() + 1));
+}
+
+#[pyfunction]
+fn exit_ad_level() {
+    ACTIVE_AD_LEVEL.with(|lvl| {
+        let current = lvl.get();
+        if current > 0 {
+            lvl.set(current - 1);
+        }
+    });
+}
+
+#[pyfunction]
+fn clear_ad_registry() {
+    AD_REGISTRY.with(|reg| {
+        reg.borrow_mut().clear();
+    });
+    ACTIVE_AD_LEVEL.with(|lvl| {
+        lvl.set(0);
+    });
+    SUSPENDED_LEVELS.with(|s| {
+        s.set(0);
+    });
+}
+
+fn new_scalar(val: f32, dev: &Device) -> PyResult<PyTensor> {
+    let t = Tensor::new(&[val], dev).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+    Ok(PyTensor {
+        inner: t,
+        grad: None,
+        grad_fn: None,
+        requires_grad: false,
+        parents: Vec::new(),
+    })
+}
+
+fn propagate_ad_binary<F>(
+    self_pt: &PyTensor,
+    other_pt: &PyTensor,
+    res_pt: &PyTensor,
+    _op: &str,
+    calc_val_diff: F,
+) -> PyResult<()>
+where
+    F: Fn(&AdNodeData, &AdNodeData) -> PyResult<(PyTensor, PyTensor)>,
+{
+    let suspended = SUSPENDED_LEVELS.with(|s| s.get());
+
+    let mut levels_to_propagate = Vec::new();
+    AD_REGISTRY.with(|reg| {
+        let reg_borrow = reg.borrow();
+        for level in 0..=4 {
+            if (suspended & (1 << level)) != 0 {
+                continue;
+            }
+            let self_has = reg_borrow.contains_key(&(self_pt.inner.id(), level));
+            let other_has = reg_borrow.contains_key(&(other_pt.inner.id(), level));
+            if self_has || other_has {
+                levels_to_propagate.push(level);
+            }
+        }
+    });
+
+    if !levels_to_propagate.is_empty() {
+        for level in levels_to_propagate {
+            let orig_suspended = SUSPENDED_LEVELS.with(|s| {
+                let prev = s.get();
+                s.set(prev | (1 << level));
+                prev
+            });
+
+            let orig_active = ACTIVE_AD_LEVEL.with(|lvl| {
+                let prev = lvl.get();
+                lvl.set(level);
+                prev
+            });
+
+            let self_ad = AD_REGISTRY.with(|reg| {
+                reg.borrow().get(&(self_pt.inner.id(), level)).cloned()
+            }).unwrap_or_else(|| {
+                let zero_diff = new_scalar(0.0, &self_pt.inner.device()).unwrap();
+                AdNodeData {
+                    val: self_pt.clone(),
+                    diff: zero_diff,
+                    vmap_level: None,
+                }
+            });
+
+            let other_ad = AD_REGISTRY.with(|reg| {
+                reg.borrow().get(&(other_pt.inner.id(), level)).cloned()
+            }).unwrap_or_else(|| {
+                let zero_diff = new_scalar(0.0, &self_pt.inner.device()).unwrap();
+                AdNodeData {
+                    val: other_pt.clone(),
+                    diff: zero_diff,
+                    vmap_level: None,
+                }
+            });
+
+            let (res_val, res_diff) = calc_val_diff(&self_ad, &other_ad)?;
+
+            let res_tid = res_pt.inner.id();
+            AD_REGISTRY.with(|reg| {
+                reg.borrow_mut().insert((res_tid, level), AdNodeData {
+                    val: res_val,
+                    diff: res_diff,
+                    vmap_level: None,
+                });
+            });
+
+            ACTIVE_AD_LEVEL.with(|lvl| lvl.set(orig_active));
+            SUSPENDED_LEVELS.with(|s| s.set(orig_suspended));
+        }
+    }
+    Ok(())
+}
+
+fn propagate_ad_unary<F>(
+    self_pt: &PyTensor,
+    res_pt: &PyTensor,
+    calc_val_diff: F,
+) -> PyResult<()>
+where
+    F: Fn(&AdNodeData) -> PyResult<(PyTensor, PyTensor)>,
+{
+    let suspended = SUSPENDED_LEVELS.with(|s| s.get());
+
+    let mut levels_to_propagate = Vec::new();
+    AD_REGISTRY.with(|reg| {
+        let reg_borrow = reg.borrow();
+        for level in 0..=4 {
+            if (suspended & (1 << level)) != 0 {
+                continue;
+            }
+            if reg_borrow.contains_key(&(self_pt.inner.id(), level)) {
+                levels_to_propagate.push(level);
+            }
+        }
+    });
+
+    if !levels_to_propagate.is_empty() {
+        for level in levels_to_propagate {
+            let orig_suspended = SUSPENDED_LEVELS.with(|s| {
+                let prev = s.get();
+                s.set(prev | (1 << level));
+                prev
+            });
+
+            let orig_active = ACTIVE_AD_LEVEL.with(|lvl| {
+                let prev = lvl.get();
+                lvl.set(level);
+                prev
+            });
+
+            let self_ad = AD_REGISTRY.with(|reg| {
+                reg.borrow().get(&(self_pt.inner.id(), level)).cloned()
+            }).unwrap_or_else(|| {
+                let zero_diff = new_scalar(0.0, &self_pt.inner.device()).unwrap();
+                AdNodeData {
+                    val: self_pt.clone(),
+                    diff: zero_diff,
+                    vmap_level: None,
+                }
+            });
+
+            let (res_val, res_diff) = calc_val_diff(&self_ad)?;
+
+            let res_tid = res_pt.inner.id();
+            AD_REGISTRY.with(|reg| {
+                reg.borrow_mut().insert((res_tid, level), AdNodeData {
+                    val: res_val,
+                    diff: res_diff,
+                    vmap_level: None,
+                });
+            });
+
+            ACTIVE_AD_LEVEL.with(|lvl| lvl.set(orig_active));
+            SUSPENDED_LEVELS.with(|s| s.set(orig_suspended));
+        }
+    }
+    Ok(())
+}
+
 fn get_python_grad_history(py: Python<'_>, param_id: usize) -> Option<(Vec<usize>, Vec<f32>)> {
     if let Ok(tensor_mod) = py.import_bound("torch_candle") {
         if let Ok(tensor_cls) = tensor_mod.getattr("Tensor") {
@@ -723,6 +922,46 @@ impl PyTensor {
         }
     }
 
+    pub fn to_grad_tensor(&self, diff: &PyTensor) -> PyResult<Self> {
+        let tid = self.inner.id();
+        let level = ACTIVE_AD_LEVEL.with(|lvl| lvl.get());
+        AD_REGISTRY.with(|reg| {
+            reg.borrow_mut().insert((tid, level), AdNodeData {
+                val: self.clone(),
+                diff: diff.clone(),
+                vmap_level: None,
+            });
+        });
+        Ok(self.clone())
+    }
+
+    #[getter]
+    pub fn ad_val(&self) -> Option<PyTensor> {
+        let tid = self.inner.id();
+        let level = ACTIVE_AD_LEVEL.with(|lvl| lvl.get());
+        AD_REGISTRY.with(|reg| {
+            reg.borrow().get(&(tid, level)).map(|data| data.val.clone())
+        })
+    }
+
+    #[getter]
+    pub fn ad_diff(&self) -> Option<PyTensor> {
+        let tid = self.inner.id();
+        let level = ACTIVE_AD_LEVEL.with(|lvl| lvl.get());
+        AD_REGISTRY.with(|reg| {
+            reg.borrow().get(&(tid, level)).map(|data| data.diff.clone())
+        })
+    }
+
+    #[getter]
+    pub fn vmap_level(&self) -> Option<usize> {
+        let tid = self.inner.id();
+        let level = ACTIVE_AD_LEVEL.with(|lvl| lvl.get());
+        AD_REGISTRY.with(|reg| {
+            reg.borrow().get(&(tid, level)).and_then(|data| data.vmap_level)
+        })
+    }
+
     #[getter]
     fn shape(&self) -> Vec<usize> {
         self.inner.dims().to_vec()
@@ -1123,13 +1362,21 @@ impl PyTensor {
             parents.push(other.clone());
         }
 
-        Ok(PyTensor { 
+        let res = PyTensor { 
             inner, 
             grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None },
             grad_fn,
             requires_grad,
             parents,
-        })
+        };
+
+        propagate_ad_binary(self, other, &res, "add", |lhs_ad, rhs_ad| {
+            let val = lhs_ad.val.add(&rhs_ad.val)?;
+            let diff = lhs_ad.diff.add(&rhs_ad.diff)?;
+            Ok((val, diff))
+        })?;
+
+        Ok(res)
     }
 
     fn sub(&self, other: &PyTensor) -> PyResult<Self> {
@@ -1147,13 +1394,21 @@ impl PyTensor {
             parents.push(other.clone());
         }
 
-        Ok(PyTensor { 
+        let res = PyTensor { 
             inner, 
             grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None },
             grad_fn,
             requires_grad,
             parents,
-        })
+        };
+
+        propagate_ad_binary(self, other, &res, "sub", |lhs_ad, rhs_ad| {
+            let val = lhs_ad.val.sub(&rhs_ad.val)?;
+            let diff = lhs_ad.diff.sub(&rhs_ad.diff)?;
+            Ok((val, diff))
+        })?;
+
+        Ok(res)
     }
 
     fn abs(&self) -> PyResult<Self> {
@@ -1212,13 +1467,23 @@ impl PyTensor {
             parents.push(other.clone());
         }
 
-        Ok(PyTensor { 
+        let res = PyTensor { 
             inner, 
             grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None },
             grad_fn,
             requires_grad,
             parents,
-        })
+        };
+
+        propagate_ad_binary(self, other, &res, "mul", |lhs_ad, rhs_ad| {
+            let val = lhs_ad.val.mul(&rhs_ad.val)?;
+            let self_diff_other_val = lhs_ad.diff.mul(&rhs_ad.val)?;
+            let self_val_other_diff = lhs_ad.val.mul(&rhs_ad.diff)?;
+            let diff = self_diff_other_val.add(&self_val_other_diff)?;
+            Ok((val, diff))
+        })?;
+
+        Ok(res)
     }
 
     fn div(&self, other: &PyTensor) -> PyResult<Self> {
@@ -1241,13 +1506,25 @@ impl PyTensor {
             parents.push(other.clone());
         }
 
-        Ok(PyTensor { 
+        let res = PyTensor { 
             inner, 
             grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None },
             grad_fn,
             requires_grad,
             parents,
-        })
+        };
+
+        propagate_ad_binary(self, other, &res, "div", |lhs_ad, rhs_ad| {
+            let val = lhs_ad.val.div(&rhs_ad.val)?;
+            let self_diff_other_val = lhs_ad.diff.mul(&rhs_ad.val)?;
+            let self_val_other_diff = lhs_ad.val.mul(&rhs_ad.diff)?;
+            let num = self_diff_other_val.sub(&self_val_other_diff)?;
+            let den = rhs_ad.val.mul(&rhs_ad.val)?;
+            let diff = num.div(&den)?;
+            Ok((val, diff))
+        })?;
+
+        Ok(res)
     }
 
     fn matmul(&self, other: &PyTensor) -> PyResult<Self> {
@@ -1269,13 +1546,23 @@ impl PyTensor {
             parents.push(other.clone());
         }
 
-        Ok(PyTensor { 
+        let res = PyTensor { 
             inner, 
             grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None },
             grad_fn,
             requires_grad,
             parents,
-        })
+        };
+
+        propagate_ad_binary(self, other, &res, "matmul", |lhs_ad, rhs_ad| {
+            let val = lhs_ad.val.matmul(&rhs_ad.val)?;
+            let self_diff_other_val = lhs_ad.diff.matmul(&rhs_ad.val)?;
+            let self_val_other_diff = lhs_ad.val.matmul(&rhs_ad.diff)?;
+            let diff = self_diff_other_val.add(&self_val_other_diff)?;
+            Ok((val, diff))
+        })?;
+
+        Ok(res)
     }
 
     // --- Reductions ---
@@ -1290,13 +1577,21 @@ impl PyTensor {
             parents.push(self.clone());
         }
 
-        Ok(PyTensor { 
+        let res = PyTensor { 
             inner, 
             grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None },
             grad_fn,
             requires_grad,
             parents,
-        })
+        };
+
+        propagate_ad_unary(self, &res, |self_ad| {
+            let r_val = self_ad.val.sum_all()?;
+            let r_diff = self_ad.diff.sum_all()?;
+            Ok((r_val, r_diff))
+        })?;
+
+        Ok(res)
     }
 
     fn mean_all(&self) -> PyResult<Self> {
@@ -1645,7 +1940,15 @@ impl PyTensor {
             grad_fn = Some(Arc::new(SumDimNode { input_shape: self.inner.dims().to_vec(), dim, keepdim }) as Arc<dyn OpNode>);
             parents.push(self.clone());
         }
-        Ok(PyTensor { inner, grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None }, grad_fn, requires_grad, parents })
+        let res = PyTensor { inner, grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None }, grad_fn, requires_grad, parents };
+
+        propagate_ad_unary(self, &res, |self_ad| {
+            let r_val = self_ad.val.sum_dim(dim, keepdim)?;
+            let r_diff = self_ad.diff.sum_dim(dim, keepdim)?;
+            Ok((r_val, r_diff))
+        })?;
+
+        Ok(res)
     }
 
     fn mean_dim(&self, dim: usize, keepdim: bool) -> PyResult<Self> {
@@ -2345,11 +2648,14 @@ fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_enable_sha, m)?)?;
     m.add_function(wrap_pyfunction!(get_enable_sha, m)?)?;
     m.add_function(wrap_pyfunction!(clear_grad_history, m)?)?;
+    m.add_function(wrap_pyfunction!(clear_ad_registry, m)?)?;
     m.add_function(wrap_pyfunction!(push_dispatch_level, m)?)?;
     m.add_function(wrap_pyfunction!(pop_dispatch_level, m)?)?;
     m.add_function(wrap_pyfunction!(get_active_dispatch_level, m)?)?;
     m.add_function(wrap_pyfunction!(jit::compile_ast, m)?)?;
     m.add_function(wrap_pyfunction!(increment_kernel_call_count, m)?)?;
+    m.add_function(wrap_pyfunction!(enter_ad_level, m)?)?;
+    m.add_function(wrap_pyfunction!(exit_ad_level, m)?)?;
     m.add_function(wrap_pyfunction!(get_kernel_call_count, m)?)?;
     m.add_function(wrap_pyfunction!(reset_kernel_call_count, m)?)?;
     Ok(())

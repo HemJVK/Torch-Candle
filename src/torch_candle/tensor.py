@@ -14,7 +14,7 @@ class Tensor:
     """torch_candle.Tensor — thin wrapper around candle.Tensor (Rust via PyO3).
     """
 
-    __slots__ = ['_tensor', '_device', '_dtype', '_shape', '_id', '_shm']
+    __slots__ = ['_tensor', '_device', '_dtype', '_shape', '_id', '_shm', '_grad_history_list']
 
     _grad_enabled = True  # toggled by torch.no_grad()
     enable_sha = False
@@ -38,6 +38,8 @@ class Tensor:
     def __init__(self, data, dtype="float32", device="cpu", requires_grad=False):
         if device is None: device = "cpu"
         if dtype is None: dtype = "float32"
+        if hasattr(data, "tensor") and isinstance(getattr(data, "tensor"), Tensor):
+            data = data.tensor
         if isinstance(data, Tensor):
             if requires_grad and not data.requires_grad:
                 # Recreate leaf tensor with gradients
@@ -495,8 +497,6 @@ class Tensor:
         event = Event()
         event.record(comp_stream)
         event.wait(comm_stream)
-        
-        _allocator.record_stream(id(self), comm_stream.stream_id)
 
     def __del__(self):
         try:

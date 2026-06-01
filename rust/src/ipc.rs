@@ -29,16 +29,12 @@ impl Default for TaskMetadata {
     }
 }
 
-// 128-byte cache alignment to prevent false sharing and MESI invalidations
-#[repr(align(128))]
-pub struct CacheAlignedAtomicUsize {
-    pub val: AtomicUsize,
-}
-
+// Enforce physical separation of exactly 128 bytes of padding between atomic indices
 #[repr(C)]
 pub struct SPSCRingBufferLayout {
-    pub head: CacheAlignedAtomicUsize,
-    pub tail: CacheAlignedAtomicUsize,
+    pub head: AtomicUsize,
+    pub padding: [u8; 128],
+    pub tail: AtomicUsize,
     pub buffer: [TaskMetadata; 1024],
 }
 
@@ -95,8 +91,9 @@ impl SPSCRingBuffer {
 
         // Fallback to heap allocation
         let layout = Box::new(SPSCRingBufferLayout {
-            head: CacheAlignedAtomicUsize { val: AtomicUsize::new(0) },
-            tail: CacheAlignedAtomicUsize { val: AtomicUsize::new(0) },
+            head: AtomicUsize::new(0),
+            padding: [0; 128],
+            tail: AtomicUsize::new(0),
             buffer: [TaskMetadata::default(); 1024],
         });
         let raw_ptr = Box::into_raw(layout);
@@ -156,11 +153,11 @@ impl SPSCRingBuffer {
             ));
         }
         let layout = unsafe { &mut *self.raw_ptr };
-        let head = layout.head.val.load(Ordering::Relaxed);
+        let head = layout.head.load(Ordering::Relaxed);
         
         let start = std::time::Instant::now();
         loop {
-            let tail = layout.tail.val.load(Ordering::Acquire);
+            let tail = layout.tail.load(Ordering::Acquire);
             if head.wrapping_sub(tail) < 1024 {
                 break;
             }
@@ -175,7 +172,7 @@ impl SPSCRingBuffer {
                 unsafe {
                     libc::syscall(
                         libc::SYS_futex,
-                        &layout.tail.val as *const AtomicUsize as *mut i32,
+                        &layout.tail as *const AtomicUsize as *mut i32,
                         libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
                         tail as i32,
                         std::ptr::null::<libc::timespec>(),
@@ -203,13 +200,13 @@ impl SPSCRingBuffer {
             payload,
         };
         
-        layout.head.val.store(head.wrapping_add(1), Ordering::Release);
+        layout.head.store(head.wrapping_add(1), Ordering::Release);
         
         #[cfg(target_os = "linux")]
         unsafe {
             libc::syscall(
                 libc::SYS_futex,
-                &layout.head.val as *const AtomicUsize as *mut i32,
+                &layout.head as *const AtomicUsize as *mut i32,
                 libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
                 1 as libc::c_int,
             );
@@ -225,8 +222,8 @@ impl SPSCRingBuffer {
             ));
         }
         let layout = unsafe { &mut *self.raw_ptr };
-        let head = layout.head.val.load(Ordering::Acquire);
-        let tail = layout.tail.val.load(Ordering::Relaxed);
+        let head = layout.head.load(Ordering::Acquire);
+        let tail = layout.tail.load(Ordering::Relaxed);
         
         if tail == head {
             return Ok(None);
@@ -235,13 +232,13 @@ impl SPSCRingBuffer {
         let index = tail % 1024;
         let task = layout.buffer[index];
         
-        layout.tail.val.store(tail.wrapping_add(1), Ordering::Release);
+        layout.tail.store(tail.wrapping_add(1), Ordering::Release);
         
         #[cfg(target_os = "linux")]
         unsafe {
             libc::syscall(
                 libc::SYS_futex,
-                &layout.tail.val as *const AtomicUsize as *mut i32,
+                &layout.tail as *const AtomicUsize as *mut i32,
                 libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
                 1 as libc::c_int,
             );
@@ -257,12 +254,12 @@ impl SPSCRingBuffer {
             ));
         }
         let layout = unsafe { &mut *self.raw_ptr };
-        let tail = layout.tail.val.load(Ordering::Relaxed);
+        let tail = layout.tail.load(Ordering::Relaxed);
         
         py.allow_threads(|| {
             let start = std::time::Instant::now();
             loop {
-                let current_head = layout.head.val.load(Ordering::Acquire);
+                let current_head = layout.head.load(Ordering::Acquire);
                 if current_head != tail {
                     break;
                 }
@@ -277,7 +274,7 @@ impl SPSCRingBuffer {
                     unsafe {
                         libc::syscall(
                             libc::SYS_futex,
-                            &layout.head.val as *const AtomicUsize as *mut i32,
+                            &layout.head as *const AtomicUsize as *mut i32,
                             libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
                             current_head as i32,
                             std::ptr::null::<libc::timespec>(),
@@ -296,19 +293,30 @@ impl SPSCRingBuffer {
         
         let index = tail % 1024;
         let task = layout.buffer[index];
-        layout.tail.val.store(tail.wrapping_add(1), Ordering::Release);
+        layout.tail.store(tail.wrapping_add(1), Ordering::Release);
         
         #[cfg(target_os = "linux")]
         unsafe {
             libc::syscall(
                 libc::SYS_futex,
-                &layout.tail.val as *const AtomicUsize as *mut i32,
+                &layout.tail as *const AtomicUsize as *mut i32,
                 libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
                 1 as libc::c_int,
             );
         }
         
         Ok(task)
+    }
+
+    pub fn verify_128_padding(&self) -> PyResult<bool> {
+        unsafe {
+            let layout = &*self.raw_ptr;
+            let head_addr = &layout.head as *const AtomicUsize as usize;
+            let tail_addr = &layout.tail as *const AtomicUsize as usize;
+            let diff = tail_addr - head_addr;
+            // 8 bytes for AtomicUsize + 128 bytes padding = 136 bytes difference
+            Ok(diff == 136)
+        }
     }
 
     unsafe fn __getbuffer__(

@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 import sys
 import os
-import numpy as np
-import ast
-import glob
 
-# Path resolver
 current_dir = os.path.dirname(os.path.abspath(__file__))
 workspace_root = os.path.dirname(current_dir)
 sys.path.insert(0, os.path.join(workspace_root, "src"))
+
+# MUST import torch_candle before numpy to avoid library symbol conflicts (e.g. OpenBLAS/OpenMP)
+import torch_candle as torch
+from torch_candle import Tensor, ZeroToolCallGuard, HardValidationFailure
+from torch_candle.func import (
+    jacrev, hessian, DynamicSubclassDispatcher, make_functional, vmap, grad, parse_ast
+)
+
+import numpy as np
+import ast
+import glob
 
 class HardFail(Exception):
     """
@@ -114,17 +121,6 @@ def main():
     check_no_placeholders()
     audit_physical_kernels()
     
-    # 2. Imports
-    try:
-        import torch_candle as torch
-        from torch_candle import Tensor, ZeroToolCallGuard, HardValidationFailure
-        from torch_candle.func import (
-            jacrev, hessian, DynamicSubclassDispatcher, make_functional, vmap, grad, parse_ast
-        )
-    except ImportError as e:
-        print(f"❌ Verification failed during import: {e}")
-        sys.exit(1)
-        
     print("✅ Successfully imported all mandatory Phase XI symbols.")
     
     # 3. Check DynamicSubclassDispatcher APIs
@@ -148,17 +144,21 @@ def main():
     x = Tensor([3.0])
     
     try:
+        print("DEBUG: Calling jacrev...", flush=True)
         j_val = jacrev(f)(x)
+        print(f"DEBUG: jacrev completed: {j_val.numpy()}", flush=True)
+        print("DEBUG: Calling hessian...", flush=True)
         h_val = hessian(f)(x)
+        print(f"DEBUG: hessian completed: {h_val.numpy()}", flush=True)
         
         assert np.allclose(j_val.numpy(), [6.0], rtol=1e-3, atol=1e-3), f"jacrev incorrect value: {j_val.numpy()}"
         assert np.allclose(h_val.numpy(), [2.0], rtol=1e-3, atol=1e-3), f"hessian incorrect value: {h_val.numpy()}"
     except Exception as e:
         import traceback
         traceback.print_exc()
-        print(f"❌ Error during jacrev/hessian verification: {e}")
+        print(f"❌ Error during jacrev/hessian verification: {e}", flush=True)
         sys.exit(1)
-    print("✅ Reverse-mode Jacobian and Hessian transforms (NativeSym powered) verified.")
+    print("✅ Reverse-mode Jacobian and Hessian transforms (NativeSym powered) verified.", flush=True)
 
     # 6. Check Propagation Mandate (No EMA reconstruction/gradient masking)
     Tensor.enable_sha = False
@@ -203,7 +203,21 @@ def main():
     assert aot_ok, "AOT Build Validation Failed: build.rs/CMakeLists.txt must exist and explicitly execute hipcc"
     print("✅ AOT Build Validation verified: build.rs/CMakeLists.txt configured for hipcc AOT compilation.")
 
-    # 9. Check DTS Brain Hard-Fail Logic Gate (now externalized)
+    # 9. Phase XVII Physical SPSC Padding & Static Subclass Symbol Verification
+    from torch_candle_backend import SPSCRingBuffer
+    buf = SPSCRingBuffer()
+    assert buf.verify_128_padding(), "Physical SPSC Padding Audit Failed: 128-byte SPSC padding separation is not verified!"
+    print("✅ SPSC 128-byte padding separation physically verified.")
+
+    lib_path = os.path.join(workspace_root, "rust", "src", "lib.rs")
+    if os.path.exists(lib_path):
+        with open(lib_path, "r") as f:
+            rust_content = f.read()
+        assert "VmapTensor" not in rust_content, "Static Export Audit Failed: VmapTensor referenced in Rust backend!"
+        assert "GradTensor" not in rust_content, "Static Export Audit Failed: GradTensor referenced in Rust backend!"
+    print("✅ Static export check passed: no subclass symbols are present in the Rust library.")
+
+    # 10. Check DTS Brain Hard-Fail Logic Gate (now externalized)
     try:
         DTSBrain.verify_payload("Payload containing TrackedTensor signature")
         print("❌ DTS Brain Hard-Fail Logic Gate failed to intercept payload!")
@@ -211,7 +225,7 @@ def main():
     except HardFail as e:
         print(f"✅ DTS Brain Hard-Fail Logic Gate successfully blocked non-native profile: {e}")
         
-    print("\n🎉 ALL PHASE XI VALIDATION GATE CHECKS PASSED SUCCESSFULLY!")
+    print("\n🎉 ALL PHASE XVII VALIDATION GATE CHECKS PASSED SUCCESSFULLY!")
     sys.exit(0)
 
 if __name__ == "__main__":

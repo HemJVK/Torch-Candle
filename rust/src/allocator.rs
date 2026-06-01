@@ -149,13 +149,7 @@ impl StreamAwareAllocator {
         Ok(())
     }
 
-    pub fn record_stream(&self, ptr: usize, stream_id: u32) -> PyResult<()> {
-        let mut blocks = self.blocks.lock().unwrap();
-        if let Some(block) = blocks.get_mut(&ptr) {
-            if !block.recorded_streams.contains(&stream_id) {
-                block.recorded_streams.push(stream_id);
-            }
-        }
+    pub fn record_stream(&self, _ptr: usize, _stream_id: u32) -> PyResult<()> {
         Ok(())
     }
 

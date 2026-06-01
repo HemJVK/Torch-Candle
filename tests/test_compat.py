@@ -3,6 +3,8 @@ import pytest
 
 def test_pytorch_compat_layer():
     # Make sure 'torch' is not in active system modules initially
+    if 'torch' in sys.modules and sys.modules['torch'].__name__ == 'torch':
+        sys.modules['real_torch'] = sys.modules['torch']
     if 'torch' in sys.modules:
         del sys.modules['torch']
         

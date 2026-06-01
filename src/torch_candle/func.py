@@ -23,129 +23,24 @@ def normalize_tool_name(name: str) -> str:
         return name
     return name.replace("-", "_")
 
-class VmapTensor(Tensor):
+class AttnBiasTensor:
     """
-    Subclass representing vectorized execution.
+    Custom tensor wrapper representing attention bias masks.
+    Avoids Python-side subclassing of Tensor completely to prevent GIL overhead.
     """
-    def __init__(self, data, **kwargs):
-        super().__init__(data, **kwargs)
-
-    def __torch_dispatch__(self, func_name, *args, **kwargs):
-        print(f"🚀 [VmapSubclass] Vectorizing operation: {func_name}")
-        import torch_candle_backend as _kernels
-        # Gather all underlying PyTensors from the arguments
-        underlying = []
-        for arg in args:
-            if isinstance(arg, Tensor):
-                underlying.append(arg._tensor)
-            elif isinstance(arg, (list, tuple)):
-                for x in arg:
-                    if isinstance(x, Tensor):
-                        underlying.append(x._tensor)
-        if underlying:
-            res_pytensor = _kernels.VmapDispatcher.vectorized_forward(underlying, func_name)
-            return Tensor._fast_wrap(res_pytensor)
-        return super().__torch_dispatch__(func_name, *args, **kwargs)
-
-class GradTensor(Tensor):
-    """
-    Subclass representing reverse-mode autograd execution.
-    Uses flat subclass-based exact AD to avoid interpreter closures.
-    """
-    def __init__(self, data, val=None, diff=None, **kwargs):
-        if isinstance(data, Tensor):
-            super().__init__(data._tensor, **kwargs)
-        else:
-            super().__init__(data, **kwargs)
-        
-        if val is not None:
-            self._val = val
-        elif isinstance(data, GradTensor):
-            self._val = data
-            
-        if diff is not None:
-            self._diff = diff
-            
-        self._grad_history = []
-
-    @property
-    def val(self):
-        if not hasattr(self, "_val"):
-            self._val = Tensor(self._tensor)
-        return self._val
-
-    @val.setter
-    def val(self, value):
-        self._val = value
-
-    @property
-    def diff(self):
-        if not hasattr(self, "_diff"):
-            self._diff = Tensor([1.0], device=self.device)
-        return self._diff
-
-    @diff.setter
-    def diff(self, value):
-        self._diff = value
-
-    def sum(self, dim=None, keepdim=False):
-        res_val = self.val.sum(dim, keepdim)
+    def __init__(self, data, mask_type="block_diagonal", **kwargs):
         from torch_candle import Tensor
-        import numpy as np
-        ones = Tensor(np.ones(self.val.shape, dtype=np.float32), device=self.device)
-        res_diff = ones * self.diff
-        return GradTensor(res_val, val=res_val, diff=res_diff)
+        self.tensor = Tensor(data, **kwargs)
+        self.mask_type = mask_type
+
+    def __getattr__(self, name):
+        return getattr(self.tensor, name)
 
     def __add__(self, other):
-        if not isinstance(other, GradTensor):
-            other = GradTensor(other, val=other, diff=Tensor([0.0], device=self.device))
-        res_val = self.val + other.val
-        res_diff = self.diff + other.diff
-        return GradTensor(res_val, val=res_val, diff=res_diff)
+        return self.tensor + other
 
     def __radd__(self, other):
-        return self.__add__(other)
-
-    def __sub__(self, other):
-        if not isinstance(other, GradTensor):
-            other = GradTensor(other, val=other, diff=Tensor([0.0], device=self.device))
-        res_val = self.val - other.val
-        res_diff = self.diff - other.diff
-        return GradTensor(res_val, val=res_val, diff=res_diff)
-
-    def __rsub__(self, other):
-        if not isinstance(other, GradTensor):
-            other = GradTensor(other, val=other, diff=Tensor([0.0], device=self.device))
-        res_val = other.val - self.val
-        res_diff = other.diff - self.diff
-        return GradTensor(res_val, val=res_val, diff=res_diff)
-
-    def __mul__(self, other):
-        if not isinstance(other, GradTensor):
-            other = GradTensor(other, val=other, diff=Tensor([0.0], device=self.device))
-        res_val = self.val * other.val
-        res_diff = self.diff * other.val + self.val * other.diff
-        return GradTensor(res_val, val=res_val, diff=res_diff)
-
-    def __rmul__(self, other):
-        return self.__mul__(other)
-
-    def __truediv__(self, other):
-        if not isinstance(other, GradTensor):
-            other = GradTensor(other, val=other, diff=Tensor([0.0], device=self.device))
-        res_val = self.val / other.val
-        res_diff = (self.diff * other.val - self.val * other.diff) / (other.val * other.val)
-        return GradTensor(res_val, val=res_val, diff=res_diff)
-
-    def __rtruediv__(self, other):
-        if not isinstance(other, GradTensor):
-            other = GradTensor(other, val=other, diff=Tensor([0.0], device=self.device))
-        res_val = other.val / self.val
-        res_diff = (other.diff * self.val - other.val * self.diff) / (self.val * self.val)
-        return GradTensor(res_val, val=res_val, diff=res_diff)
-
-    def __neg__(self):
-        return GradTensor(-self.val, val=-self.val, diff=-self.diff)
+        return other + self.tensor
 
 def parse_ast(source_code):
     """
@@ -318,44 +213,54 @@ def vmap(func, in_dims=0, out_dims=0):
         finally:
             pop_dispatch_level()
     return wrapped
+
 def grad(func, argnums=0):
     """Returns a function that computes the gradient of `func` with respect to `argnums` argument."""
     def wrapped(*args, **kwargs):
-        x = args[argnums]
-        x_grad = GradTensor(x, diff=Tensor([1.0], device=x.device))
-        
-        new_args = list(args)
-        new_args[argnums] = x_grad
-        
-        out = func(*new_args, **kwargs)
-        
-        if isinstance(out, GradTensor):
-            res = out.diff
-        else:
-            res = Tensor([0.0], device=x.device)
+        _kernels.enter_ad_level()
+        try:
+            x = args[argnums]
+            diff = Tensor([1.0], device=x.device)
+            x_grad = Tensor(x._tensor.to_grad_tensor(diff._tensor))
             
-        # Self-healing Autograd EMA logic
-        from torch_candle import get_disable_ema_estimates
-        disable_ema = get_disable_ema_estimates()
-        
-        import numpy as np
-        res_np = res.numpy()
-        has_anomaly = np.isnan(res_np).any() or np.isinf(res_np).any()
-        
-        if getattr(Tensor, "enable_sha", True) and not disable_ema:
-            if has_anomaly:
-                if x_grad._grad_history:
-                    beta = 0.9
-                    g_prev = x_grad._grad_history[-1]
-                    res = g_prev * beta
-                    x_grad._grad_history.append(res)
+            new_args = list(args)
+            new_args[argnums] = x_grad
+            
+            out = func(*new_args, **kwargs)
+            
+            if hasattr(out, "_tensor") and out._tensor.ad_diff is not None:
+                res = Tensor(out._tensor.ad_diff)
             else:
-                x_grad._grad_history.append(res)
-        elif not has_anomaly:
-            x_grad._grad_history.append(res)
+                res = Tensor([0.0], device=x.device)
+                
+            # Self-healing Autograd EMA logic
+            from torch_candle import get_disable_ema_estimates
+            disable_ema = get_disable_ema_estimates()
+            
+            import numpy as np
+            res_np = res.numpy()
+            has_anomaly = np.isnan(res_np).any() or np.isinf(res_np).any()
+            
+            if not hasattr(x_grad, "_grad_history_list") or getattr(x_grad, "_grad_history_list", None) is None:
+                x_grad._grad_history_list = []
+                
+            if getattr(Tensor, "enable_sha", True) and not disable_ema:
+                if has_anomaly:
+                    if x_grad._grad_history_list:
+                        beta = 0.9
+                        g_prev = x_grad._grad_history_list[-1]
+                        res = g_prev * beta
+                        x_grad._grad_history_list.append(res)
+                else:
+                    x_grad._grad_history_list.append(res)
+            elif not has_anomaly:
+                x_grad._grad_history_list.append(res)
+        finally:
+            _kernels.exit_ad_level()
             
         return res
     return wrapped
+
 
 def vjp(func, *primals):
     """Vector-Jacobian Product primal-dual primitive."""
@@ -536,57 +441,29 @@ def subclass_dispatch(func):
         return _kernels.subclass_dispatch(func, args, kwargs)
     return wrapper
 
-from torch_candle import Tensor
-
-class AttnBiasTensor(Tensor):
-    """
-    Custom tensor subclass representing attention bias masks (e.g. block-diagonal, causal).
-    Enables dynamic, stateless functional transformation dispatching and custom mask routing.
-    """
-    def __init__(self, data, mask_type="block_diagonal", **kwargs):
-        super().__init__(data, **kwargs)
-        self.mask_type = mask_type
-
-    def __torch_dispatch__(self, func_name, *args, **kwargs):
-        if func_name == "scaled_dot_product_attention":
-            print(f"🚀 [Subclass Dispatcher] Routing SDPA through AttnBiasTensor ({self.mask_type})")
-            return self.optimized_sdpa(*args, **kwargs)
-        return super().__torch_dispatch__(func_name, *args, **kwargs)
-
-    def optimized_sdpa(self, query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False):
-        d_k = key.shape[-1]
-        scale = 1.0 / (d_k ** 0.5)
-        k_t = key.transpose(-2, -1).contiguous()
-        scores = query.matmul(k_t) * scale
-        
-        # Apply the attention bias mask represented by self
-        scores = scores + self
-        
-        from torch_candle.nn.functional import softmax, dropout
-        attn_weights = softmax(scores, dim=-1)
-        if dropout_p > 0.0:
-            attn_weights = dropout(attn_weights, p=dropout_p, training=True)
-        return attn_weights.matmul(value)
-
-
 def jacrev(func, argnums=0):
     """
     Computes the Jacobian of `func` with respect to the argument at `argnums`
     using pure reverse-mode automatic differentiation. Finite-difference fallback is prohibited.
     """
     def wrapped(*args, **kwargs):
-        x = args[argnums]
-        x_grad = GradTensor(x, diff=Tensor([1.0], device=x.device))
-        
-        new_args = list(args)
-        new_args[argnums] = x_grad
-        
-        out = func(*new_args, **kwargs)
-        
-        if isinstance(out, GradTensor):
-            res = out.diff
-        else:
-            res = Tensor([0.0], device=x.device)
+        _kernels.enter_ad_level()
+        try:
+            x = args[argnums]
+            diff = Tensor([1.0], device=x.device)
+            x_grad = Tensor(x._tensor.to_grad_tensor(diff._tensor))
+            
+            new_args = list(args)
+            new_args[argnums] = x_grad
+            
+            out = func(*new_args, **kwargs)
+            
+            if hasattr(out, "_tensor") and out._tensor.ad_diff is not None:
+                res = Tensor(out._tensor.ad_diff)
+            else:
+                res = Tensor([0.0], device=x.device)
+        finally:
+            _kernels.exit_ad_level()
             
         return res
         
