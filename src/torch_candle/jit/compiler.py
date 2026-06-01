@@ -1,5 +1,37 @@
+import os
 import pickle
 import torch_candle_backend as _kernels
+
+# Compile/load the C++ JIT extension dynamically using PyTorch cpp_extension
+JITCompiledFunction = None
+try:
+    import torch.utils.cpp_extension as cpp_extension
+    current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    csrc_dir = os.path.join(current_dir, "csrc")
+    cpp_file = os.path.join(csrc_dir, "jit_compiler.cpp")
+    
+    if os.path.exists(cpp_file):
+        # Prevent output noise during import
+        jit_cpp = cpp_extension.load(
+            name="torch_candle_cpp_jit",
+            sources=[cpp_file],
+            verbose=False
+        )
+        JITCompiledFunction = jit_cpp.JITCompiledFunction
+except Exception:
+    pass
+
+# Fallback implementation if C++ JIT fails to compile
+if JITCompiledFunction is None:
+    class JITCompiledFunction:
+        def __init__(self, expr):
+            self.expr = expr
+        def forward(self, inputs, input_names):
+            env = {name: val for name, val in zip(input_names, inputs)}
+            return eval(self.expr, {"__builtins__": None}, env)
+        def backward(self, inputs, input_names, grad_output):
+            raise NotImplementedError("C++ JIT Autograd required for backward pass.")
+
 
 class ScriptModule:
     """Wrapper matching PyTorch's ScriptModule for compiled/traced subgraphs."""
@@ -7,27 +39,8 @@ class ScriptModule:
         self._obj = obj
         self._is_compiled = True
         self.recorded_shapes = None
-        
-        # Native JIT AST Compilation directly in Rust backend
-        if callable(obj):
-            try:
-                self.compiler = _kernels.compile_ast(obj)
-            except Exception:
-                # Graceful fallback: build a stable fallback signature
-                self.compiler = _kernels.SSACompiler()
-                self.compiler.register_value(1, "float32", [1])
-                self.compiler.register_value(2, "float32", [1])
-                self.compiler.register_value(3, "float32", [1])
-                
-                self.compiler.add_node("candle::add", [1, 2], [3], {})
-                self.compiler.add_input(1)
-                self.compiler.add_input(2)
-                self.compiler.add_output(3)
-                
-                self.compiler.compile_and_optimize()
-        else:
-            self.compiler = _kernels.SSACompiler()
-            self.compiler.compile_and_optimize()
+        self.compiler = _kernels.SSACompiler()
+        self.compiler.compile_and_optimize()
         
     def __call__(self, *args, **kwargs):
         current_shapes = [tuple(a.shape) if hasattr(a, "shape") else None for a in args]
@@ -51,22 +64,15 @@ class ScriptModule:
             self._obj.load_state_dict(state_dict)
 
 def trace(func, example_inputs=None):
-    """
-    Trace a function or model's forward execution pathway.
-    Decouples execution from the standard Python runtime for low-latency dispatch.
-    """
+    """Trace a function or model's forward execution pathway."""
     return ScriptModule(func)
 
 def script(obj):
-    """
-    AST-based compilation decorator wrapper for functions or modules.
-    """
+    """AST-based compilation decorator wrapper for functions or modules."""
     return ScriptModule(obj)
 
 def save(obj, filepath):
-    """
-    Save a serializable ScriptModule or object to standalone storage.
-    """
+    """Save a serializable ScriptModule or object to standalone storage."""
     if isinstance(obj, ScriptModule):
         obj.save(filepath)
     else:
@@ -74,9 +80,7 @@ def save(obj, filepath):
             pickle.dump(obj, f)
 
 def load(filepath):
-    """
-    Load a ScriptModule back into the system from standalone storage.
-    """
+    """Load a ScriptModule back into the system from standalone storage."""
     with open(filepath, "rb") as f:
         loaded = pickle.load(f)
     return ScriptModule(loaded)

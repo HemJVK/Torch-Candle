@@ -183,9 +183,17 @@ def grad(func, argnums=0):
         
         def wrapped(*args, **kwargs):
             x = args[argnums]
-            x_tensor = x._tensor if isinstance(x, Tensor) else x
-            res_pytensor = sym_grad.eval(x_tensor)
-            return Tensor._fast_wrap(res_pytensor)
+            if isinstance(x, _kernels.NativeSym):
+                return sym_grad
+            
+            from torch_candle.jit.compiler import JITCompiledFunction
+            expr_str = sym_grad.expr_string()
+            compiled = JITCompiledFunction(expr_str)
+            
+            import torch as real_torch
+            real_x = real_torch.from_numpy(x.numpy())
+            real_out = compiled.forward([real_x], ["x"])
+            return Tensor(real_out.numpy(), device=x.device)
         return wrapped
     except Exception:
         def wrapped(*args, **kwargs):
@@ -429,9 +437,17 @@ def jacrev(func, argnums=0):
         
         def wrapped(*args, **kwargs):
             x = args[argnums]
-            x_tensor = x._tensor if isinstance(x, Tensor) else x
-            res_pytensor = sym_grad.eval(x_tensor)
-            return Tensor._fast_wrap(res_pytensor)
+            if isinstance(x, _kernels.NativeSym):
+                return sym_grad
+            
+            from torch_candle.jit.compiler import JITCompiledFunction
+            expr_str = sym_grad.expr_string()
+            compiled = JITCompiledFunction(expr_str)
+            
+            import torch as real_torch
+            real_x = real_torch.from_numpy(x.numpy())
+            real_out = compiled.forward([real_x], ["x"])
+            return Tensor(real_out.numpy(), device=x.device)
         return wrapped
     except Exception:
         def wrapped(*args, **kwargs):

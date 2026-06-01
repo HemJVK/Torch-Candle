@@ -568,6 +568,17 @@ impl SymExpr {
         }
     }
 
+    fn to_string(&self) -> String {
+        match self {
+            SymExpr::Var => "x".to_string(),
+            SymExpr::Const(c) => c.to_string(),
+            SymExpr::Add(left, right) => format!("({}+{})", left.to_string(), right.to_string()),
+            SymExpr::Sub(left, right) => format!("({}-{})", left.to_string(), right.to_string()),
+            SymExpr::Mul(left, right) => format!("({}*{})", left.to_string(), right.to_string()),
+            SymExpr::Pow(left, n) => format!("({}**{})", left.to_string(), n),
+        }
+    }
+
     fn eval(&self, val: &crate::PyTensor) -> PyResult<crate::PyTensor> {
         match self {
             SymExpr::Var => Ok(val.clone()),
@@ -718,6 +729,10 @@ impl NativeSym {
         Self {
             expr: self.expr.diff(),
         }
+    }
+
+    fn expr_string(&self) -> String {
+        self.expr.to_string()
     }
 
     fn eval(&self, val: &Bound<'_, PyAny>) -> PyResult<PyObject> {

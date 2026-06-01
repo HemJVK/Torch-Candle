@@ -139,6 +139,19 @@ fn get_python_enable_sha(py: Python<'_>) -> bool {
     true
 }
 
+fn get_disable_ema_estimates(py: Python<'_>) -> bool {
+    if let Ok(tensor_mod) = py.import_bound("torch_candle") {
+        if let Ok(fn_val) = tensor_mod.getattr("get_disable_ema_estimates") {
+            if let Ok(res) = fn_val.call0() {
+                if let Ok(val) = res.extract::<bool>() {
+                    return val;
+                }
+            }
+        }
+    }
+    false
+}
+
 // --- Autograd Infrastructure ---
 
 pub trait OpNode: Send + Sync {
@@ -1025,7 +1038,7 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (py_param_id=None))]
-    fn retrieve_grad(&self, _py: Python<'_>, py_param_id: Option<usize>) -> PyResult<Option<PyTensor>> {
+    fn retrieve_grad(&self, _py: Python<'_>, _py_param_id: Option<usize>) -> PyResult<Option<PyTensor>> {
         if let Some(ref g_mutex) = self.grad {
             let g_opt = g_mutex.lock();
             if let Some(ref g) = *g_opt {

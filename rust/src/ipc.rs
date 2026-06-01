@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use pyo3::prelude::*;
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -48,6 +47,7 @@ pub struct SPSCRingBufferLayout {
 pub struct SPSCRingBuffer {
     raw_ptr: *mut SPSCRingBufferLayout,
     is_owner: bool,
+    is_mmap: bool,
     condvar: Arc<std::sync::Condvar>,
     condvar_mutex: Arc<std::sync::Mutex<()>>,
 }
@@ -60,6 +60,7 @@ impl Clone for SPSCRingBuffer {
         Self {
             raw_ptr: self.raw_ptr,
             is_owner: false,
+            is_mmap: self.is_mmap,
             condvar: self.condvar.clone(),
             condvar_mutex: self.condvar_mutex.clone(),
         }
@@ -70,6 +71,36 @@ impl Clone for SPSCRingBuffer {
 impl SPSCRingBuffer {
     #[new]
     pub fn new() -> Self {
+        let path = "/dev/shm/torch_candle_ipc";
+        unsafe {
+            let path_cstr = std::ffi::CString::new(path).unwrap();
+            let fd = libc::open(path_cstr.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o666);
+            if fd >= 0 {
+                let size = std::mem::size_of::<SPSCRingBufferLayout>();
+                libc::ftruncate(fd, size as libc::off_t);
+                let raw_ptr = libc::mmap(
+                    std::ptr::null_mut(),
+                    size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    fd,
+                    0,
+                );
+                libc::close(fd);
+                if raw_ptr != libc::MAP_FAILED {
+                    std::ptr::write_bytes(raw_ptr, 0, size);
+                    return Self {
+                        raw_ptr: raw_ptr as *mut SPSCRingBufferLayout,
+                        is_owner: true,
+                        is_mmap: true,
+                        condvar: Arc::new(std::sync::Condvar::new()),
+                        condvar_mutex: Arc::new(std::sync::Mutex::new(())),
+                    };
+                }
+            }
+        }
+
+        // Fallback to heap allocation
         let layout = Box::new(SPSCRingBufferLayout {
             head: CacheAlignedAtomicUsize { val: AtomicUsize::new(0) },
             tail: CacheAlignedAtomicUsize { val: AtomicUsize::new(0) },
@@ -79,8 +110,53 @@ impl SPSCRingBuffer {
         Self {
             raw_ptr,
             is_owner: true,
+            is_mmap: false,
             condvar: Arc::new(std::sync::Condvar::new()),
             condvar_mutex: Arc::new(std::sync::Mutex::new(())),
+        }
+    }
+
+    #[staticmethod]
+    pub fn from_mmap(path: &str, is_owner: bool) -> PyResult<Self> {
+        unsafe {
+            let path_cstr = std::ffi::CString::new(path).unwrap();
+            let fd = if is_owner {
+                libc::open(path_cstr.as_ptr(), libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC, 0o666)
+            } else {
+                libc::open(path_cstr.as_ptr(), libc::O_RDWR, 0o666)
+            };
+            if fd < 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to open mmap file: {}", path)));
+            }
+            let size = std::mem::size_of::<SPSCRingBufferLayout>();
+            if is_owner {
+                libc::ftruncate(fd, size as libc::off_t);
+            }
+            let raw_ptr = libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if raw_ptr == libc::MAP_FAILED {
+                libc::close(fd);
+                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("mmap failed"));
+            }
+            libc::close(fd);
+            
+            if is_owner {
+                std::ptr::write_bytes(raw_ptr, 0, size);
+            }
+            
+            Ok(Self {
+                raw_ptr: raw_ptr as *mut SPSCRingBufferLayout,
+                is_owner,
+                is_mmap: true,
+                condvar: Arc::new(std::sync::Condvar::new()),
+                condvar_mutex: Arc::new(std::sync::Mutex::new(())),
+            })
         }
     }
 
@@ -163,7 +239,11 @@ impl Drop for SPSCRingBuffer {
     fn drop(&mut self) {
         if self.is_owner {
             unsafe {
-                let _ = Box::from_raw(self.raw_ptr);
+                if self.is_mmap {
+                    libc::munmap(self.raw_ptr as *mut libc::c_void, std::mem::size_of::<SPSCRingBufferLayout>());
+                } else {
+                    let _ = Box::from_raw(self.raw_ptr);
+                }
             }
         }
     }

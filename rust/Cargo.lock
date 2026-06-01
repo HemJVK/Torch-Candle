@@ -2566,6 +2566,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "cfg-if",
+ "libc",
  "ndarray",
  "numpy",
  "parking_lot",
