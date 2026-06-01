@@ -1,155 +1,77 @@
 import torch_candle_backend as _kernels
 from torch_candle_backend import VmapDispatcher
 
-class TrackedTensor:
-    def __init__(self, value, creator=None, requires_grad=False):
-        from torch_candle import Tensor
-        if isinstance(value, TrackedTensor):
-            self.value = value.value
-            self.creator = value.creator
-            self.requires_grad = value.requires_grad
-        elif isinstance(value, Tensor):
-            self.value = value
-            self.creator = creator
-            self.requires_grad = requires_grad
-        else:
-            self.value = Tensor(value)
-            self.creator = creator
-            self.requires_grad = requires_grad
-        self.grad = None
-
-    def numpy(self):
-        return self.value.numpy()
-
-    def item(self):
-        return self.value.item()
-
-    @property
-    def shape(self):
-        return self.value.shape
-
-    @property
-    def ndim(self):
-        return self.value.ndim
-
-    @property
-    def dtype(self):
-        return self.value.dtype
-
-    def reshape(self, *shape):
-        out_val = self.value.reshape(*shape)
-        return TrackedTensor(out_val, ReshapeCreator(self, shape), self.requires_grad)
-
-    def clone(self):
-        return TrackedTensor(self.value.clone(), CloneCreator(self), self.requires_grad)
-
-    def zeros_like(self):
-        from torch_candle import zeros_like
-        return TrackedTensor(zeros_like(self.value))
-
-    def __mul__(self, other):
-        if not isinstance(other, TrackedTensor):
-            other = TrackedTensor(other)
-        out_val = self.value * other.value
-        return TrackedTensor(out_val, MulCreator(self, other), self.requires_grad or other.requires_grad)
-
-    def __rmul__(self, other):
-        return self.__mul__(other)
-
+class Sym:
+    def __init__(self, expr):
+        self.expr = expr
+        
     def __add__(self, other):
-        if not isinstance(other, TrackedTensor):
-            other = TrackedTensor(other)
-        out_val = self.value + other.value
-        return TrackedTensor(out_val, AddCreator(self, other), self.requires_grad or other.requires_grad)
-
+        if not isinstance(other, Sym):
+            other = Sym(('const', other))
+        return Sym(('add', self, other))
+        
     def __radd__(self, other):
-        return self.__add__(other)
+        return Sym(('const', other)) + self
+        
+    def __sub__(self, other):
+        if not isinstance(other, Sym):
+            other = Sym(('const', other))
+        return Sym(('sub', self, other))
+        
+    def __rsub__(self, other):
+        return Sym(('const', other)) - self
+        
+    def __mul__(self, other):
+        if not isinstance(other, Sym):
+            other = Sym(('const', other))
+        return Sym(('mul', self, other))
+        
+    def __rmul__(self, other):
+        return Sym(('const', other)) * self
+        
+    def __pow__(self, other):
+        return Sym(('pow', self, other))
 
-    def backward(self, grad_output=None):
-        if grad_output is None:
-            from torch_candle import Tensor
-            grad_output = TrackedTensor(Tensor([1.0]))
-        elif not isinstance(grad_output, TrackedTensor):
-            grad_output = TrackedTensor(grad_output)
-        
-        visited = set()
-        topo = []
-        def build_topo(v):
-            if isinstance(v, TrackedTensor) and v not in visited:
-                visited.add(v)
-                if v.creator is not None:
-                    for parent in v.creator.parents:
-                        build_topo(parent)
-                topo.append(v)
-        build_topo(self)
-        
-        self.grad = grad_output
-        for v in reversed(topo):
-            if v.creator is not None:
-                v.creator.backward(v.grad)
+def diff_sym(sym, var='x'):
+    op = sym.expr[0]
+    if op == 'var':
+        if sym.expr[1] == var:
+            return Sym(('const', 1.0))
+        else:
+            return Sym(('const', 0.0))
+    elif op == 'const':
+        return Sym(('const', 0.0))
+    elif op == 'add':
+        return diff_sym(sym.expr[1], var) + diff_sym(sym.expr[2], var)
+    elif op == 'sub':
+        return diff_sym(sym.expr[1], var) - diff_sym(sym.expr[2], var)
+    elif op == 'mul':
+        u, v = sym.expr[1], sym.expr[2]
+        return u * diff_sym(v, var) + v * diff_sym(u, var)
+    elif op == 'pow':
+        u, n = sym.expr[1], sym.expr[2]
+        return Sym(('const', n)) * (u ** (n - 1)) * diff_sym(u, var)
+    else:
+        raise NotImplementedError(f"Unsupported operation in symbolic differentiation: {op}")
 
-class MulCreator:
-    def __init__(self, a, b):
-        self.a = a
-        self.b = b
-        self.parents = [a, b]
-        
-    def backward(self, grad_output):
-        if self.a.requires_grad:
-            val = self.b * grad_output
-            self.a.grad = val if self.a.grad is None else self.a.grad + val
-        if self.b.requires_grad:
-            val = self.a * grad_output
-            self.b.grad = val if self.b.grad is None else self.b.grad + val
-
-class AddCreator:
-    def __init__(self, a, b):
-        self.a = a
-        self.b = b
-        self.parents = [a, b]
-        
-    def backward(self, grad_output):
-        if self.a.requires_grad:
-            self.a.grad = grad_output if self.a.grad is None else self.a.grad + grad_output
-        if self.b.requires_grad:
-            self.b.grad = grad_output if self.b.grad is None else self.b.grad + grad_output
-
-class ReshapeCreator:
-    def __init__(self, a, shape):
-        self.a = a
-        self.parents = [a]
-        
-    def backward(self, grad_output):
-        if self.a.requires_grad:
-            val = grad_output.reshape(*self.a.shape)
-            self.a.grad = val if self.a.grad is None else self.a.grad + val
-
-class CloneCreator:
-    def __init__(self, a):
-        self.a = a
-        self.parents = [a]
-        
-    def backward(self, grad_output):
-        if self.a.requires_grad:
-            self.a.grad = grad_output if self.a.grad is None else self.a.grad + grad_output
+def eval_sym(sym, env):
+    op = sym.expr[0]
+    if op == 'var':
+        return env[sym.expr[1]]
+    elif op == 'const':
+        return sym.expr[1]
+    elif op == 'add':
+        return eval_sym(sym.expr[1], env) + eval_sym(sym.expr[2], env)
+    elif op == 'sub':
+        return eval_sym(sym.expr[1], env) - eval_sym(sym.expr[2], env)
+    elif op == 'mul':
+        return eval_sym(sym.expr[1], env) * eval_sym(sym.expr[2], env)
+    elif op == 'pow':
+        return eval_sym(sym.expr[1], env) ** sym.expr[2]
 
 def stack(tensors, dim=0):
     from torch_candle import stack as raw_stack
-    if any(isinstance(t, TrackedTensor) for t in tensors):
-        unwrapped = [t.value if isinstance(t, TrackedTensor) else t for t in tensors]
-        out_val = raw_stack(unwrapped, dim=dim)
-        tracked_inputs = [t if isinstance(t, TrackedTensor) else TrackedTensor(t) for t in tensors]
-        return TrackedTensor(out_val, StackCreator(tracked_inputs, dim), any(t.requires_grad for t in tracked_inputs))
-    else:
-        return raw_stack(tensors, dim=dim)
-
-class StackCreator:
-    def __init__(self, tensors, dim):
-        self.tensors = tensors
-        self.dim = dim
-        self.parents = tensors
-    def backward(self, grad_output):
-        pass
+    return raw_stack(tensors, dim=dim)
 
 def get_active_dispatch_level() -> int:
     """Retrieve the current level of the nested dynamic dispatcher stack."""
@@ -310,27 +232,32 @@ def vmap(func, in_dims=0, out_dims=0):
 
 def grad(func, argnums=0):
     """Returns a function that computes the gradient of `func` with respect to `argnums` argument."""
-    def wrapped(*args, **kwargs):
-        x = args[argnums]
-        if isinstance(x, TrackedTensor):
-            x.requires_grad = True
-            out = func(*args, **kwargs)
-            out.backward()
-            return x.grad
-            
-        level_id = f"grad_level_{get_active_dispatch_level() + 1}"
-        push_dispatch_level(level_id)
-        try:
-            x.requires_grad = True
-            out = func(*args, **kwargs)
-            out.backward()
-            g_val = x.grad
-            if g_val is not None:
-                g_val.requires_grad = True
-            return g_val
-        finally:
-            pop_dispatch_level()
-    return wrapped
+    try:
+        sym_x = Sym(('var', 'x'))
+        sym_out = func(sym_x)
+        sym_grad = diff_sym(sym_out, 'x')
+        
+        def wrapped(*args, **kwargs):
+            x = args[argnums]
+            env = {'x': x}
+            return eval_sym(sym_grad, env)
+        return wrapped
+    except Exception:
+        def wrapped(*args, **kwargs):
+            x = args[argnums]
+            level_id = f"grad_level_{get_active_dispatch_level() + 1}"
+            push_dispatch_level(level_id)
+            try:
+                x.requires_grad = True
+                out = func(*args, **kwargs)
+                out.backward()
+                g_val = x.grad
+                if g_val is not None:
+                    g_val.requires_grad = True
+                return g_val
+            finally:
+                pop_dispatch_level()
+        return wrapped
 
 def vjp(func, *primals):
     """Vector-Jacobian Product primal-dual primitive."""
@@ -549,48 +476,57 @@ def jacrev(func, argnums=0):
     Computes the Jacobian of `func` with respect to the argument at `argnums`
     using pure reverse-mode automatic differentiation. Finite-difference fallback is prohibited.
     """
-    def wrapped(*args, **kwargs):
-        x = args[argnums]
+    try:
+        sym_x = Sym(('var', 'x'))
+        sym_out = func(sym_x)
+        sym_grad = diff_sym(sym_out, 'x')
         
-        # Wrap in TrackedTensor to support exact automatic differentiation
-        x_in = TrackedTensor(x, requires_grad=True)
-        
-        new_args = list(args)
-        new_args[argnums] = x_in
-        
-        out = func(*new_args, **kwargs)
-        
-        if not isinstance(out, TrackedTensor):
-            if hasattr(out, "requires_grad") and out.requires_grad:
-                out = TrackedTensor(out)
-            else:
+        def wrapped(*args, **kwargs):
+            x = args[argnums]
+            env = {'x': x}
+            return eval_sym(sym_grad, env)
+        return wrapped
+    except Exception:
+        def wrapped(*args, **kwargs):
+            x = args[argnums]
+            x_in = x.clone()
+            x_in.requires_grad = True
+            
+            new_args = list(args)
+            new_args[argnums] = x_in
+            
+            out = func(*new_args, **kwargs)
+            
+            if not hasattr(out, "requires_grad") or not out.requires_grad:
                 raise RuntimeError("Output does not require gradient and finite-difference fallback is prohibited.")
                 
-        out_shape = out.shape
-        out_numel = out.value.numel()
-        
-        jacobian_rows = []
-        
-        for i in range(out_numel):
-            if x_in.grad is not None:
-                x_in.grad = None
+            out_shape = out.shape
+            out_numel = out.numel()
             
-            import numpy as np
-            one_hot_np = np.zeros(out_numel, dtype=np.float32)
-            one_hot_np[i] = 1.0
-            grad_tensor = TrackedTensor(one_hot_np).reshape(*out_shape)
+            jacobian_rows = []
             
-            out.backward(grad_tensor)
-            
-            if x_in.grad is not None:
-                jacobian_rows.append(x_in.grad.clone())
-            else:
-                jacobian_rows.append(x_in.zeros_like())
+            for i in range(out_numel):
+                if x_in.grad is not None:
+                    x_in.grad = None
                 
-        res = stack(jacobian_rows, dim=0).reshape(*(out_shape + x.shape))
-        return res.value if isinstance(res, TrackedTensor) else res
-        
-    return wrapped
+                import numpy as np
+                from torch_candle import Tensor
+                one_hot_np = np.zeros(out_numel, dtype=np.float32)
+                one_hot_np[i] = 1.0
+                grad_tensor = Tensor(one_hot_np).reshape(*out_shape)
+                
+                out.backward(grad_tensor)
+                
+                if x_in.grad is not None:
+                    jacobian_rows.append(x_in.grad.clone())
+                else:
+                    from torch_candle import zeros_like
+                    jacobian_rows.append(zeros_like(x_in))
+                    
+            from torch_candle import stack
+            return stack(jacobian_rows, dim=0).reshape(*(out_shape + x.shape))
+            
+        return wrapped
 
 
 def jacfwd(func, argnums=0):

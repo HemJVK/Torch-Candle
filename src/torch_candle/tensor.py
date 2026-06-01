@@ -17,7 +17,7 @@ class Tensor:
     __slots__ = ['_tensor', '_device', '_dtype', '_shape', '_id', '_shm']
 
     _grad_enabled = True  # toggled by torch.no_grad()
-    enable_sha = True
+    enable_sha = False
     _grad_history = {}
 
     def __hash__(self):
@@ -131,28 +131,7 @@ class Tensor:
         g = self._tensor.retrieve_grad(self._id)
         if g is None:
             return None
-        t_grad = self._fast_wrap(g, dtype=self.dtype)
-        
-        import torch_candle as torch
-        if getattr(Tensor, "enable_sha", True) and not torch.DISABLE_EMA_ESTIMATES:
-            arr = t_grad.numpy()
-            mask = np.isnan(arr) | np.isinf(arr)
-            if np.any(mask):
-                history = Tensor._grad_history.get(self._id)
-                if history is not None:
-                    healed_arr = np.where(mask, history, arr)
-                    new_history = np.where(mask, history, 0.9 * history + 0.1 * arr)
-                    Tensor._grad_history[self._id] = new_history
-                    healed_tensor = Tensor(healed_arr, device=self.device)
-                    self._tensor.grad = healed_tensor._tensor
-                    return healed_tensor
-            else:
-                history = Tensor._grad_history.get(self._id)
-                if history is not None:
-                    Tensor._grad_history[self._id] = 0.9 * history + 0.1 * arr
-                else:
-                    Tensor._grad_history[self._id] = arr.copy()
-        return t_grad
+        return self._fast_wrap(g, dtype=self.dtype)
 
     @grad.setter
     def grad(self, value):
@@ -160,30 +139,10 @@ class Tensor:
             self._tensor.grad = None
             return
             
-        import torch_candle as torch
         if not isinstance(value, Tensor):
             value = Tensor(value, device=self.device)
             
-        raw_val = value._tensor
-        
-        if getattr(Tensor, "enable_sha", True) and not torch.DISABLE_EMA_ESTIMATES:
-            arr = value.numpy()
-            mask = np.isnan(arr) | np.isinf(arr)
-            if np.any(mask):
-                history = Tensor._grad_history.get(self._id)
-                if history is not None:
-                    healed_arr = np.where(mask, history, arr)
-                    new_history = np.where(mask, history, 0.9 * history + 0.1 * arr)
-                    Tensor._grad_history[self._id] = new_history
-                    raw_val = Tensor(healed_arr, device=self.device)._tensor
-            else:
-                history = Tensor._grad_history.get(self._id)
-                if history is not None:
-                    Tensor._grad_history[self._id] = 0.9 * history + 0.1 * arr
-                else:
-                    Tensor._grad_history[self._id] = arr.copy()
-                    
-        self._tensor.grad = raw_val
+        self._tensor.grad = value._tensor
 
     @property
     def grad_fn(self):

@@ -51,6 +51,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
+# Optimize map count for Docker sandbox memory mapping
+RUN echo "vm.max_map_count=1048576" >> /etc/sysctl.conf || true
+
 WORKDIR /app
 
 # Copy python virtual environment and compiled build from builder

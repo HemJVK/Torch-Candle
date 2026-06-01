@@ -228,5 +228,5 @@ def test_autograd_ema_trajectory_healing():
     assert w_anom.grad.item() == 1.5
     
     w_anom.grad = torch.Tensor([float('nan')])
-    assert w_anom.grad.item() == pytest.approx(1.5)
+    assert np.isnan(w_anom.grad.item()), "NaN was healed but EMA is purged"
 
