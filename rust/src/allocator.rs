@@ -102,12 +102,14 @@ impl StreamAwareAllocator {
         for block in blocks.values_mut() {
             if block.is_idle && block.size >= size {
                 // blockFree: block is safe for reuse since all recorded streams are completed in our CPU model.
-                println!("🚀 [StreamAwareAllocator] blockFree: Reusing block address 0x{:x} from stream {} (now stream {})", block.ptr, block.stream_id, stream_id);
-                block.is_idle = false;
-                block.stream_id = stream_id;
-                block.tag = tag.clone();
-                block.recorded_streams.clear();
-                return Ok(block.ptr);
+                if block.recorded_streams.is_empty() || block.recorded_streams.contains(&stream_id) {
+                    println!("🚀 [StreamAwareAllocator] blockFree: Reusing block address 0x{:x} from stream {} (now stream {})", block.ptr, block.stream_id, stream_id);
+                    block.is_idle = false;
+                    block.stream_id = stream_id;
+                    block.tag = tag.clone();
+                    block.recorded_streams.clear();
+                    return Ok(block.ptr);
+                }
             }
         }
         
@@ -147,8 +149,13 @@ impl StreamAwareAllocator {
         Ok(())
     }
 
-    pub fn record_stream(&self, _ptr: usize, _stream_id: u32) -> PyResult<()> {
-        // CPU tracking has been completely unsubscribed under Phase XV directives
+    pub fn record_stream(&self, ptr: usize, stream_id: u32) -> PyResult<()> {
+        let mut blocks = self.blocks.lock().unwrap();
+        if let Some(block) = blocks.get_mut(&ptr) {
+            if !block.recorded_streams.contains(&stream_id) {
+                block.recorded_streams.push(stream_id);
+            }
+        }
         Ok(())
     }
 

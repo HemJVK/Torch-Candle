@@ -150,6 +150,11 @@ impl SPSCRingBuffer {
     }
 
     pub fn push(&self, op_code: u32, device_id: u32, payload_bytes: Vec<u8>) -> PyResult<()> {
+        if !self.is_mmap {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "CRITICAL_FFI_SERIALIZATION_ERROR: PyBuffer is not explicitly detected as the transport layer. Pipeline aborted."
+            ));
+        }
         let layout = unsafe { &mut *self.raw_ptr };
         let head = layout.head.val.load(Ordering::Relaxed);
         
@@ -214,6 +219,11 @@ impl SPSCRingBuffer {
     }
 
     pub fn pop(&self) -> PyResult<Option<TaskMetadata>> {
+        if !self.is_mmap {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "CRITICAL_FFI_SERIALIZATION_ERROR: PyBuffer is not explicitly detected as the transport layer. Pipeline aborted."
+            ));
+        }
         let layout = unsafe { &mut *self.raw_ptr };
         let head = layout.head.val.load(Ordering::Acquire);
         let tail = layout.tail.val.load(Ordering::Relaxed);
@@ -241,6 +251,11 @@ impl SPSCRingBuffer {
     }
 
     pub fn wait_and_pop(&self, py: Python<'_>) -> PyResult<TaskMetadata> {
+        if !self.is_mmap {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "CRITICAL_FFI_SERIALIZATION_ERROR: PyBuffer is not explicitly detected as the transport layer. Pipeline aborted."
+            ));
+        }
         let layout = unsafe { &mut *self.raw_ptr };
         let tail = layout.tail.val.load(Ordering::Relaxed);
         

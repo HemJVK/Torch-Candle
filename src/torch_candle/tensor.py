@@ -486,17 +486,17 @@ class Tensor:
     def record_stream(self, stream):
         """
         Record that the tensor is being used by the given stream.
-        Replaced legacy record_stream memory tracking with explicit stream-to-stream
-        synchronization using GPU-native Events to unsubscribe the CPU.
+        Re-enrolls active caching allocator metadata tracking alongside GPU-native Events.
         """
-        from torch_candle.cuda import Event, Stream
+        from torch_candle.cuda import Event, Stream, _allocator
         comp_stream = Stream(0)
         comm_stream = stream if isinstance(stream, Stream) else Stream(stream)
         
-        # CPU Unsubscription: Shift the synchronization burden entirely to GPU hardware events
         event = Event()
         event.record(comp_stream)
         event.wait(comm_stream)
+        
+        _allocator.record_stream(id(self), comm_stream.stream_id)
 
     def __del__(self):
         try:

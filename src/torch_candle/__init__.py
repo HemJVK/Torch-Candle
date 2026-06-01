@@ -67,7 +67,8 @@ try:
     from . import func
     from .func import (
         subclass_dispatch, AttnBiasTensor, jacrev, jacfwd, hessian,
-        DynamicSubclassDispatcher, make_functional, make_functional_with_buffers, vmap, grad
+        DynamicSubclassDispatcher, make_functional, make_functional_with_buffers, vmap, grad,
+        VmapTensor, GradTensor
     )
 except ImportError:
     pass

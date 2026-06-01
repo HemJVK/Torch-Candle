@@ -23,116 +23,129 @@ def normalize_tool_name(name: str) -> str:
         return name
     return name.replace("-", "_")
 
-def safe_add(a, b):
-    if isinstance(a, SymbolicTensor):
-        return a + b
-    if isinstance(b, SymbolicTensor):
-        return b + a
-    return a + b
+class VmapTensor(Tensor):
+    """
+    Subclass representing vectorized execution.
+    """
+    def __init__(self, data, **kwargs):
+        super().__init__(data, **kwargs)
 
-def safe_sub(a, b):
-    if isinstance(a, SymbolicTensor):
-        return a - b
-    if isinstance(b, SymbolicTensor):
-        return -b + a
-    return a - b
+    def __torch_dispatch__(self, func_name, *args, **kwargs):
+        print(f"🚀 [VmapSubclass] Vectorizing operation: {func_name}")
+        import torch_candle_backend as _kernels
+        # Gather all underlying PyTensors from the arguments
+        underlying = []
+        for arg in args:
+            if isinstance(arg, Tensor):
+                underlying.append(arg._tensor)
+            elif isinstance(arg, (list, tuple)):
+                for x in arg:
+                    if isinstance(x, Tensor):
+                        underlying.append(x._tensor)
+        if underlying:
+            res_pytensor = _kernels.VmapDispatcher.vectorized_forward(underlying, func_name)
+            return Tensor._fast_wrap(res_pytensor)
+        return super().__torch_dispatch__(func_name, *args, **kwargs)
 
-def safe_mul(a, b):
-    if isinstance(a, SymbolicTensor):
-        return a * b
-    if isinstance(b, SymbolicTensor):
-        return b * a
-    return a * b
+class GradTensor(Tensor):
+    """
+    Subclass representing reverse-mode autograd execution.
+    Uses flat subclass-based exact AD to avoid interpreter closures.
+    """
+    def __init__(self, data, val=None, diff=None, **kwargs):
+        if isinstance(data, Tensor):
+            super().__init__(data._tensor, **kwargs)
+        else:
+            super().__init__(data, **kwargs)
+        
+        if val is not None:
+            self._val = val
+        elif isinstance(data, GradTensor):
+            self._val = data
+            
+        if diff is not None:
+            self._diff = diff
+            
+        self._grad_history = []
 
-def safe_div(a, b):
-    if isinstance(a, SymbolicTensor):
-        return a / b
-    if isinstance(b, SymbolicTensor):
-        # b is symbolic
-        return SymbolicTensor(
-            lambda x: a / b.val_fn(x),
-            lambda x: -(a * b.diff_fn(x)) / (b.val_fn(x) * b.val_fn(x))
-        )
-    return a / b
+    @property
+    def val(self):
+        if not hasattr(self, "_val"):
+            self._val = Tensor(self._tensor)
+        return self._val
 
-class SymbolicTensor:
-    def __init__(self, val_fn, diff_fn):
-        self.val_fn = val_fn
-        self.diff_fn = diff_fn
+    @val.setter
+    def val(self, value):
+        self._val = value
+
+    @property
+    def diff(self):
+        if not hasattr(self, "_diff"):
+            self._diff = Tensor([1.0], device=self.device)
+        return self._diff
+
+    @diff.setter
+    def diff(self, value):
+        self._diff = value
+
+    def sum(self, dim=None, keepdim=False):
+        res_val = self.val.sum(dim, keepdim)
+        from torch_candle import Tensor
+        import numpy as np
+        ones = Tensor(np.ones(self.val.shape, dtype=np.float32), device=self.device)
+        res_diff = ones * self.diff
+        return GradTensor(res_val, val=res_val, diff=res_diff)
 
     def __add__(self, other):
-        if isinstance(other, SymbolicTensor):
-            return SymbolicTensor(
-                lambda x: safe_add(self.val_fn(x), other.val_fn(x)),
-                lambda x: safe_add(self.diff_fn(x), other.diff_fn(x))
-            )
-        return SymbolicTensor(
-            lambda x: safe_add(self.val_fn(x), other),
-            lambda x: self.diff_fn(x)
-        )
+        if not isinstance(other, GradTensor):
+            other = GradTensor(other, val=other, diff=Tensor([0.0], device=self.device))
+        res_val = self.val + other.val
+        res_diff = self.diff + other.diff
+        return GradTensor(res_val, val=res_val, diff=res_diff)
 
     def __radd__(self, other):
         return self.__add__(other)
 
     def __sub__(self, other):
-        if isinstance(other, SymbolicTensor):
-            return SymbolicTensor(
-                lambda x: safe_sub(self.val_fn(x), other.val_fn(x)),
-                lambda x: safe_sub(self.diff_fn(x), other.diff_fn(x))
-            )
-        return SymbolicTensor(
-            lambda x: safe_sub(self.val_fn(x), other),
-            lambda x: self.diff_fn(x)
-        )
+        if not isinstance(other, GradTensor):
+            other = GradTensor(other, val=other, diff=Tensor([0.0], device=self.device))
+        res_val = self.val - other.val
+        res_diff = self.diff - other.diff
+        return GradTensor(res_val, val=res_val, diff=res_diff)
 
     def __rsub__(self, other):
-        return SymbolicTensor(
-            lambda x: safe_sub(other, self.val_fn(x)),
-            lambda x: -self.diff_fn(x)
-        )
+        if not isinstance(other, GradTensor):
+            other = GradTensor(other, val=other, diff=Tensor([0.0], device=self.device))
+        res_val = other.val - self.val
+        res_diff = other.diff - self.diff
+        return GradTensor(res_val, val=res_val, diff=res_diff)
 
     def __mul__(self, other):
-        if isinstance(other, SymbolicTensor):
-            return SymbolicTensor(
-                lambda x: safe_mul(self.val_fn(x), other.val_fn(x)),
-                lambda x: safe_add(
-                    safe_mul(self.diff_fn(x), other.val_fn(x)),
-                    safe_mul(self.val_fn(x), other.diff_fn(x))
-                )
-            )
-        return SymbolicTensor(
-            lambda x: safe_mul(self.val_fn(x), other),
-            lambda x: safe_mul(self.diff_fn(x), other)
-        )
+        if not isinstance(other, GradTensor):
+            other = GradTensor(other, val=other, diff=Tensor([0.0], device=self.device))
+        res_val = self.val * other.val
+        res_diff = self.diff * other.val + self.val * other.diff
+        return GradTensor(res_val, val=res_val, diff=res_diff)
 
     def __rmul__(self, other):
         return self.__mul__(other)
 
     def __truediv__(self, other):
-        if isinstance(other, SymbolicTensor):
-            return SymbolicTensor(
-                lambda x: safe_div(self.val_fn(x), other.val_fn(x)),
-                lambda x: safe_div(
-                    safe_sub(
-                        safe_mul(self.diff_fn(x), other.val_fn(x)),
-                        safe_mul(self.val_fn(x), other.diff_fn(x))
-                    ),
-                    safe_mul(other.val_fn(x), other.val_fn(x))
-                )
-            )
-        return SymbolicTensor(
-            lambda x: safe_div(self.val_fn(x), other),
-            lambda x: safe_div(self.diff_fn(x), other)
-        )
+        if not isinstance(other, GradTensor):
+            other = GradTensor(other, val=other, diff=Tensor([0.0], device=self.device))
+        res_val = self.val / other.val
+        res_diff = (self.diff * other.val - self.val * other.diff) / (other.val * other.val)
+        return GradTensor(res_val, val=res_val, diff=res_diff)
+
+    def __rtruediv__(self, other):
+        if not isinstance(other, GradTensor):
+            other = GradTensor(other, val=other, diff=Tensor([0.0], device=self.device))
+        res_val = other.val / self.val
+        res_diff = (other.diff * self.val - other.val * self.diff) / (self.val * self.val)
+        return GradTensor(res_val, val=res_val, diff=res_diff)
 
     def __neg__(self):
-        return SymbolicTensor(
-            lambda x: -self.val_fn(x),
-            lambda x: -self.diff_fn(x)
-        )
-
-    def sum(self):
-        return self
+        return GradTensor(-self.val, val=-self.val, diff=-self.diff)
 
 def parse_ast(source_code):
     """
@@ -309,16 +322,38 @@ def grad(func, argnums=0):
     """Returns a function that computes the gradient of `func` with respect to `argnums` argument."""
     def wrapped(*args, **kwargs):
         x = args[argnums]
-        if isinstance(x, SymbolicTensor):
-            out_sym = func(*args, **kwargs)
-            return out_sym.diff_fn(x)
+        x_grad = GradTensor(x, diff=Tensor([1.0], device=x.device))
+        
+        new_args = list(args)
+        new_args[argnums] = x_grad
+        
+        out = func(*new_args, **kwargs)
+        
+        if isinstance(out, GradTensor):
+            res = out.diff
+        else:
+            res = Tensor([0.0], device=x.device)
             
-        from torch_candle import Tensor
-        x_sym = SymbolicTensor(lambda val: val, lambda val: Tensor([1.0], device=x.device))
-        out_sym = func(x_sym)
-        res = out_sym.diff_fn(x)
-        if not isinstance(res, Tensor):
-            res = Tensor([res], device=x.device)
+        # Self-healing Autograd EMA logic
+        from torch_candle import get_disable_ema_estimates
+        disable_ema = get_disable_ema_estimates()
+        
+        import numpy as np
+        res_np = res.numpy()
+        has_anomaly = np.isnan(res_np).any() or np.isinf(res_np).any()
+        
+        if getattr(Tensor, "enable_sha", True) and not disable_ema:
+            if has_anomaly:
+                if x_grad._grad_history:
+                    beta = 0.9
+                    g_prev = x_grad._grad_history[-1]
+                    res = g_prev * beta
+                    x_grad._grad_history.append(res)
+            else:
+                x_grad._grad_history.append(res)
+        elif not has_anomaly:
+            x_grad._grad_history.append(res)
+            
         return res
     return wrapped
 
@@ -541,16 +576,18 @@ def jacrev(func, argnums=0):
     """
     def wrapped(*args, **kwargs):
         x = args[argnums]
-        if isinstance(x, SymbolicTensor):
-            out_sym = func(*args, **kwargs)
-            return out_sym.diff_fn(x)
+        x_grad = GradTensor(x, diff=Tensor([1.0], device=x.device))
+        
+        new_args = list(args)
+        new_args[argnums] = x_grad
+        
+        out = func(*new_args, **kwargs)
+        
+        if isinstance(out, GradTensor):
+            res = out.diff
+        else:
+            res = Tensor([0.0], device=x.device)
             
-        from torch_candle import Tensor
-        x_sym = SymbolicTensor(lambda val: val, lambda val: Tensor([1.0], device=x.device))
-        out_sym = func(x_sym)
-        res = out_sym.diff_fn(x)
-        if not isinstance(res, Tensor):
-            res = Tensor([res], device=x.device)
         return res
         
     return wrapped
