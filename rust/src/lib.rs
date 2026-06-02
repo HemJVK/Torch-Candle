@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 use candle_core::{Tensor, Device, DType};
 use std::sync::Arc;
+use std::cell::RefCell;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -73,7 +74,6 @@ thread_local! {
 thread_local! {
     pub static AD_REGISTRY: RefCell<HashMap<(candle_core::TensorId, usize), AdNodeData>> = RefCell::new(HashMap::new());
     pub static ACTIVE_AD_LEVEL: std::cell::Cell<usize> = std::cell::Cell::new(0);
-    pub static SUSPENDED_LEVELS: std::cell::Cell<u8> = std::cell::Cell::new(0);
 }
 
 #[derive(Clone)]
@@ -99,15 +99,17 @@ fn exit_ad_level() {
 }
 
 #[pyfunction]
+fn get_active_ad_level() -> usize {
+    ACTIVE_AD_LEVEL.with(|lvl| lvl.get())
+}
+
+#[pyfunction]
 fn clear_ad_registry() {
     AD_REGISTRY.with(|reg| {
         reg.borrow_mut().clear();
     });
     ACTIVE_AD_LEVEL.with(|lvl| {
         lvl.set(0);
-    });
-    SUSPENDED_LEVELS.with(|s| {
-        s.set(0);
     });
 }
 
@@ -132,15 +134,10 @@ fn propagate_ad_binary<F>(
 where
     F: Fn(&AdNodeData, &AdNodeData) -> PyResult<(PyTensor, PyTensor)>,
 {
-    let suspended = SUSPENDED_LEVELS.with(|s| s.get());
-
     let mut levels_to_propagate = Vec::new();
     AD_REGISTRY.with(|reg| {
         let reg_borrow = reg.borrow();
         for level in 0..=4 {
-            if (suspended & (1 << level)) != 0 {
-                continue;
-            }
             let self_has = reg_borrow.contains_key(&(self_pt.inner.id(), level));
             let other_has = reg_borrow.contains_key(&(other_pt.inner.id(), level));
             if self_has || other_has {
@@ -151,12 +148,6 @@ where
 
     if !levels_to_propagate.is_empty() {
         for level in levels_to_propagate {
-            let orig_suspended = SUSPENDED_LEVELS.with(|s| {
-                let prev = s.get();
-                s.set(prev | (1 << level));
-                prev
-            });
-
             let orig_active = ACTIVE_AD_LEVEL.with(|lvl| {
                 let prev = lvl.get();
                 lvl.set(level);
@@ -185,7 +176,26 @@ where
                 }
             });
 
-            let (res_val, res_diff) = calc_val_diff(&self_ad, &other_ad)?;
+            // Temporarily remove inputs from AD_REGISTRY during calculation to avoid recursive loop
+            let self_tid = self_pt.inner.id();
+            let other_tid = other_pt.inner.id();
+            let removed_self = AD_REGISTRY.with(|reg| reg.borrow_mut().remove(&(self_tid, level)));
+            let removed_other = AD_REGISTRY.with(|reg| reg.borrow_mut().remove(&(other_tid, level)));
+
+            let res_result = calc_val_diff(&self_ad, &other_ad);
+
+            // Restore original registry entries
+            AD_REGISTRY.with(|reg| {
+                let mut r = reg.borrow_mut();
+                if let Some(val) = removed_self {
+                    r.insert((self_tid, level), val);
+                }
+                if let Some(val) = removed_other {
+                    r.insert((other_tid, level), val);
+                }
+            });
+
+            let (res_val, res_diff) = res_result?;
 
             let res_tid = res_pt.inner.id();
             AD_REGISTRY.with(|reg| {
@@ -197,7 +207,6 @@ where
             });
 
             ACTIVE_AD_LEVEL.with(|lvl| lvl.set(orig_active));
-            SUSPENDED_LEVELS.with(|s| s.set(orig_suspended));
         }
     }
     Ok(())
@@ -211,15 +220,10 @@ fn propagate_ad_unary<F>(
 where
     F: Fn(&AdNodeData) -> PyResult<(PyTensor, PyTensor)>,
 {
-    let suspended = SUSPENDED_LEVELS.with(|s| s.get());
-
     let mut levels_to_propagate = Vec::new();
     AD_REGISTRY.with(|reg| {
         let reg_borrow = reg.borrow();
         for level in 0..=4 {
-            if (suspended & (1 << level)) != 0 {
-                continue;
-            }
             if reg_borrow.contains_key(&(self_pt.inner.id(), level)) {
                 levels_to_propagate.push(level);
             }
@@ -228,12 +232,6 @@ where
 
     if !levels_to_propagate.is_empty() {
         for level in levels_to_propagate {
-            let orig_suspended = SUSPENDED_LEVELS.with(|s| {
-                let prev = s.get();
-                s.set(prev | (1 << level));
-                prev
-            });
-
             let orig_active = ACTIVE_AD_LEVEL.with(|lvl| {
                 let prev = lvl.get();
                 lvl.set(level);
@@ -251,7 +249,21 @@ where
                 }
             });
 
-            let (res_val, res_diff) = calc_val_diff(&self_ad)?;
+            // Temporarily remove inputs from AD_REGISTRY during calculation to avoid recursive loop
+            let self_tid = self_pt.inner.id();
+            let removed_self = AD_REGISTRY.with(|reg| reg.borrow_mut().remove(&(self_tid, level)));
+
+            let res_result = calc_val_diff(&self_ad);
+
+            // Restore original registry entries
+            AD_REGISTRY.with(|reg| {
+                let mut r = reg.borrow_mut();
+                if let Some(val) = removed_self {
+                    r.insert((self_tid, level), val);
+                }
+            });
+
+            let (res_val, res_diff) = res_result?;
 
             let res_tid = res_pt.inner.id();
             AD_REGISTRY.with(|reg| {
@@ -263,7 +275,6 @@ where
             });
 
             ACTIVE_AD_LEVEL.with(|lvl| lvl.set(orig_active));
-            SUSPENDED_LEVELS.with(|s| s.set(orig_suspended));
         }
     }
     Ok(())
@@ -933,6 +944,39 @@ impl PyTensor {
             });
         });
         Ok(self.clone())
+    }
+
+    pub fn memoryview(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let dev = self.inner.device();
+        if !dev.is_cpu() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Memoryview only supported for CPU/mmap tensors"));
+        }
+        
+        let (storage, _layout) = self.inner.storage_and_layout();
+        match &*storage {
+            candle_core::Storage::Cpu(cpu_storage) => {
+                unsafe {
+                    match cpu_storage {
+                        candle_core::CpuStorage::F32(vec) => {
+                            let slice = vec.as_slice();
+                            let ptr = slice.as_ptr() as *mut u8;
+                            let len = slice.len() * 4;
+                            let mv = pyo3::ffi::PyMemoryView_FromMemory(
+                                ptr as *mut std::os::raw::c_char,
+                                len as isize,
+                                pyo3::ffi::PyBUF_WRITE,
+                            );
+                            if mv.is_null() {
+                                return Err(PyErr::fetch(py));
+                            }
+                            Ok(Bound::from_owned_ptr(py, mv).unbind())
+                        }
+                        _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Unsupported dtype for memoryview")),
+                    }
+                }
+            }
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Tensor is not on CPU storage")),
+        }
     }
 
     #[getter]
@@ -2500,32 +2544,7 @@ extern "C" {
     fn mallopt(param: std::os::raw::c_int, value: std::os::raw::c_int) -> std::os::raw::c_int;
 }
 
-use std::cell::RefCell;
-
-thread_local! {
-    static DISPATCH_STACK: RefCell<Vec<String>> = RefCell::new(Vec::new());
-}
-
-#[pyfunction]
-fn push_dispatch_level(level_id: String) {
-    DISPATCH_STACK.with(|stack| {
-        stack.borrow_mut().push(level_id);
-    });
-}
-
-#[pyfunction]
-fn pop_dispatch_level() -> Option<String> {
-    DISPATCH_STACK.with(|stack| {
-        stack.borrow_mut().pop()
-    })
-}
-
-#[pyfunction]
-fn get_active_dispatch_level() -> usize {
-    DISPATCH_STACK.with(|stack| {
-        stack.borrow().len()
-    })
-}
+// Dispatch stack removed in favor of Python-side thread-local.
 
 #[pyclass]
 pub struct VmapDispatcher;
@@ -2649,13 +2668,11 @@ fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_enable_sha, m)?)?;
     m.add_function(wrap_pyfunction!(clear_grad_history, m)?)?;
     m.add_function(wrap_pyfunction!(clear_ad_registry, m)?)?;
-    m.add_function(wrap_pyfunction!(push_dispatch_level, m)?)?;
-    m.add_function(wrap_pyfunction!(pop_dispatch_level, m)?)?;
-    m.add_function(wrap_pyfunction!(get_active_dispatch_level, m)?)?;
     m.add_function(wrap_pyfunction!(jit::compile_ast, m)?)?;
     m.add_function(wrap_pyfunction!(increment_kernel_call_count, m)?)?;
     m.add_function(wrap_pyfunction!(enter_ad_level, m)?)?;
     m.add_function(wrap_pyfunction!(exit_ad_level, m)?)?;
+    m.add_function(wrap_pyfunction!(get_active_ad_level, m)?)?;
     m.add_function(wrap_pyfunction!(get_kernel_call_count, m)?)?;
     m.add_function(wrap_pyfunction!(reset_kernel_call_count, m)?)?;
     Ok(())

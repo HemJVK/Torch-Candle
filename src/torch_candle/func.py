@@ -57,17 +57,28 @@ def stack(tensors, dim=0):
     from torch_candle import stack as raw_stack
     return raw_stack(tensors, dim=dim)
 
+import threading
+_local_dispatch = threading.local()
+
 def get_active_dispatch_level() -> int:
     """Retrieve the current level of the nested dynamic dispatcher stack."""
-    return _kernels.get_active_dispatch_level()
+    if not hasattr(_local_dispatch, "stack"):
+        _local_dispatch.stack = []
+    return len(_local_dispatch.stack)
 
 def push_dispatch_level(level_id: str):
     """Push a new transformation level onto the dynamic dispatcher stack."""
-    _kernels.push_dispatch_level(level_id)
+    if not hasattr(_local_dispatch, "stack"):
+        _local_dispatch.stack = []
+    _local_dispatch.stack.append(level_id)
 
 def pop_dispatch_level() -> str:
     """Pop the top transformation level from the dynamic dispatcher stack."""
-    return _kernels.pop_dispatch_level()
+    if not hasattr(_local_dispatch, "stack"):
+        _local_dispatch.stack = []
+    if _local_dispatch.stack:
+        return _local_dispatch.stack.pop()
+    return None
 
 def rearrange(tensor, pattern, **axes_lengths):
     """
@@ -223,13 +234,27 @@ def grad(func, argnums=0):
             diff = Tensor([1.0], device=x.device)
             x_grad = Tensor(x._tensor.to_grad_tensor(diff._tensor))
             
+            # Wrap in subclass based on active AD level
+            active_level = _kernels.get_active_ad_level()
+            if active_level == 1:
+                from torch_candle.tensor import Level0Tensor
+                x_grad = Level0Tensor(x_grad)
+            elif active_level >= 2:
+                from torch_candle.tensor import Level1Tensor
+                x_grad = Level1Tensor(x_grad)
+            
             new_args = list(args)
             new_args[argnums] = x_grad
             
             out = func(*new_args, **kwargs)
             
-            if hasattr(out, "_tensor") and out._tensor.ad_diff is not None:
-                res = Tensor(out._tensor.ad_diff)
+            # Unwrap out if it's a subclass to get the underlying tensor for ad_diff extraction
+            out_tensor = out
+            while hasattr(out_tensor, "inner_tensor"):
+                out_tensor = out_tensor.inner_tensor
+                
+            if hasattr(out_tensor, "_tensor") and out_tensor._tensor.ad_diff is not None:
+                res = Tensor(out_tensor._tensor.ad_diff)
             else:
                 res = Tensor([0.0], device=x.device)
                 
@@ -453,13 +478,27 @@ def jacrev(func, argnums=0):
             diff = Tensor([1.0], device=x.device)
             x_grad = Tensor(x._tensor.to_grad_tensor(diff._tensor))
             
+            # Wrap in subclass based on active AD level
+            active_level = _kernels.get_active_ad_level()
+            if active_level == 1:
+                from torch_candle.tensor import Level0Tensor
+                x_grad = Level0Tensor(x_grad)
+            elif active_level >= 2:
+                from torch_candle.tensor import Level1Tensor
+                x_grad = Level1Tensor(x_grad)
+            
             new_args = list(args)
             new_args[argnums] = x_grad
             
             out = func(*new_args, **kwargs)
             
-            if hasattr(out, "_tensor") and out._tensor.ad_diff is not None:
-                res = Tensor(out._tensor.ad_diff)
+            # Unwrap out if it's a subclass to get the underlying tensor for ad_diff extraction
+            out_tensor = out
+            while hasattr(out_tensor, "inner_tensor"):
+                out_tensor = out_tensor.inner_tensor
+                
+            if hasattr(out_tensor, "_tensor") and out_tensor._tensor.ad_diff is not None:
+                res = Tensor(out_tensor._tensor.ad_diff)
             else:
                 res = Tensor([0.0], device=x.device)
         finally:

@@ -620,4 +620,111 @@ class Tensor:
         Base subclass interception layer. Routes back to standard execution
         if no subclass overrides it.
         """
+        if len(args) > 0 and args[0] is self:
+            return getattr(self, func_name)(*args[1:], **kwargs)
         return getattr(self, func_name)(*args, **kwargs)
+
+class Level0Tensor(Tensor):
+    __slots__ = ['inner_tensor']
+    def __init__(self, inner_tensor):
+        self.inner_tensor = inner_tensor
+        self._tensor = inner_tensor._tensor
+        self._device = inner_tensor._device
+        self._dtype = inner_tensor._dtype
+        self._shape = inner_tensor._shape
+        self._shm = getattr(inner_tensor, "_shm", None)
+        self._id = inner_tensor._id
+
+    def __repr__(self):
+        return f"Level0Tensor({self.inner_tensor})"
+
+    def __torch_dispatch__(self, func_name, *args, **kwargs):
+        unwrapped_args = [a.inner_tensor if isinstance(a, Level0Tensor) else a for a in args]
+        unwrapped_kwargs = {k: (v.inner_tensor if isinstance(v, Level0Tensor) else v) for k, v in kwargs.items()}
+        
+        if hasattr(Tensor, func_name):
+            attr = getattr(Tensor, func_name)
+            if isinstance(attr, property):
+                res = getattr(unwrapped_args[0], func_name)
+            else:
+                res = getattr(unwrapped_args[0], func_name)(*unwrapped_args[1:], **unwrapped_kwargs)
+        else:
+            import torch_candle.nn.functional as F
+            import torch_candle.ops as ops
+            func = None
+            if hasattr(F, func_name):
+                func = getattr(F, func_name)
+            elif hasattr(ops, func_name):
+                func = getattr(ops, func_name)
+                
+            if func is not None:
+                res = func(*unwrapped_args, **unwrapped_kwargs)
+            else:
+                raise AttributeError(f"Could not resolve function/method {func_name}")
+                
+        if isinstance(res, Tensor) and not isinstance(res, Level0Tensor):
+            return Level0Tensor(res)
+        return res
+
+class Level1Tensor(Tensor):
+    __slots__ = ['inner_tensor']
+    def __init__(self, inner_tensor):
+        self.inner_tensor = inner_tensor
+        self._tensor = inner_tensor._tensor
+        self._device = inner_tensor._device
+        self._dtype = inner_tensor._dtype
+        self._shape = inner_tensor._shape
+        self._shm = getattr(inner_tensor, "_shm", None)
+        self._id = inner_tensor._id
+
+    def __repr__(self):
+        return f"Level1Tensor({self.inner_tensor})"
+
+    def __torch_dispatch__(self, func_name, *args, **kwargs):
+        unwrapped_args = [a.inner_tensor if isinstance(a, Level1Tensor) else a for a in args]
+        unwrapped_kwargs = {k: (v.inner_tensor if isinstance(v, Level1Tensor) else v) for k, v in kwargs.items()}
+        
+        if hasattr(Tensor, func_name):
+            attr = getattr(Tensor, func_name)
+            if isinstance(attr, property):
+                res = getattr(unwrapped_args[0], func_name)
+            else:
+                res = getattr(unwrapped_args[0], func_name)(*unwrapped_args[1:], **unwrapped_kwargs)
+        else:
+            import torch_candle.nn.functional as F
+            import torch_candle.ops as ops
+            func = None
+            if hasattr(F, func_name):
+                func = getattr(F, func_name)
+            elif hasattr(ops, func_name):
+                func = getattr(ops, func_name)
+                
+            if func is not None:
+                res = func(*unwrapped_args, **unwrapped_kwargs)
+            else:
+                raise AttributeError(f"Could not resolve function/method {func_name}")
+                
+        if isinstance(res, Tensor) and not isinstance(res, Level1Tensor):
+            return Level1Tensor(res)
+        return res
+
+def _wrap_method_for_dispatch(method_name):
+    def wrapper(self, *args, **kwargs):
+        return self.__torch_dispatch__(method_name, self, *args, **kwargs)
+    return wrapper
+
+def _wrap_property_for_dispatch(property_name):
+    @property
+    def wrapper(self):
+        return self.__torch_dispatch__(property_name, self)
+    return wrapper
+
+for cls in (Level0Tensor, Level1Tensor):
+    for attr in dir(Tensor):
+        if attr in ("__init__", "__new__", "__class__", "__getattribute__", "__setattr__", "__slots__", "__doc__", "__module__", "__hash__", "__repr__", "__torch_dispatch__", "inner_tensor"):
+            continue
+        orig_attr = getattr(Tensor, attr)
+        if isinstance(orig_attr, property):
+            setattr(cls, attr, _wrap_property_for_dispatch(attr))
+        elif callable(orig_attr) or (attr.startswith("__") and attr.endswith("__")):
+            setattr(cls, attr, _wrap_method_for_dispatch(attr))

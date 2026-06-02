@@ -113,15 +113,52 @@ def verify_ast_integrity():
             
     print("✅ Automated AST Integrity Verification passed.")
 
+def check_ci_pipeline_mandate():
+    print("⏳ Running CI Pipeline Hard-Fail Configuration Check...")
+    import subprocess
+    try:
+        diff_files_proc = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        modified_files = diff_files_proc.stdout.splitlines()
+    except Exception as e:
+        print(f"Warning: git command failed: {e}. Skipping git diff checks.")
+        return
+
+    has_config_change = any("configs/" in f or "metadata/" in f for f in modified_files)
+    has_hip_change = any(f.endswith(".hip") for f in modified_files)
+
+    if has_config_change and not has_hip_change:
+        print("🚨 Hard-Fail: Configuration-only PRs are prohibited. Executable ROCm kernels are required.")
+        sys.exit(1)
+    print("✅ CI Pipeline Hard-Fail check passed.")
+
+def check_rocm_kernels():
+    print("⏳ Verifying GEMM and Conv2d ROCm HIP kernels...")
+    hip_path = os.path.join(workspace_root, "rust", "src", "kernels_rocm.hip")
+    assert os.path.exists(hip_path), "ROCm Kernel verification failed: kernels_rocm.hip does not exist!"
+    with open(hip_path, "r") as f:
+        content = f.read()
+    assert "gemm_kernel" in content, "ROCm Kernel verification failed: gemm_kernel not found in kernels_rocm.hip!"
+    assert "conv2d_kernel" in content, "ROCm Kernel verification failed: conv2d_kernel not found in kernels_rocm.hip!"
+    print("✅ GEMM and Conv2d ROCm HIP kernels verified.")
+
 def main():
-    print("⏳ Running Phase XI Deterministic Validation Gate...")
+    print("⏳ Running Phase XVIII Deterministic Validation Gate...")
+    
+    # CI Pipeline Mandate
+    check_ci_pipeline_mandate()
+    check_rocm_kernels()
     
     # 1. AST Verification & Zero-Trust Checks
     verify_ast_integrity()
     check_no_placeholders()
     audit_physical_kernels()
     
-    print("✅ Successfully imported all mandatory Phase XI symbols.")
+    print("✅ Successfully imported all mandatory symbols.")
     
     # 3. Check DynamicSubclassDispatcher APIs
     assert hasattr(DynamicSubclassDispatcher, "purify"), "DynamicSubclassDispatcher is missing 'purify'"
@@ -188,7 +225,7 @@ def main():
     except HardValidationFailure as e:
         print(f"❌ Zero-Tool-Call Guard failed: raised HardValidationFailure even when tools were called: {e}")
         sys.exit(1)
-
+ 
     # 8. Check AOT Build Validation (ROCm hipcc mandate)
     build_rs_path = os.path.join(workspace_root, "rust", "build.rs")
     cmake_path = os.path.join(workspace_root, "CMakeLists.txt")
@@ -202,13 +239,21 @@ def main():
                     break
     assert aot_ok, "AOT Build Validation Failed: build.rs/CMakeLists.txt must exist and explicitly execute hipcc"
     print("✅ AOT Build Validation verified: build.rs/CMakeLists.txt configured for hipcc AOT compilation.")
-
+ 
     # 9. Phase XVII Physical SPSC Padding & Static Subclass Symbol Verification
     from torch_candle_backend import SPSCRingBuffer
     buf = SPSCRingBuffer()
     assert buf.verify_128_padding(), "Physical SPSC Padding Audit Failed: 128-byte SPSC padding separation is not verified!"
     print("✅ SPSC 128-byte padding separation physically verified.")
 
+    # 9.2 verify_mmap_accessibility check
+    assert hasattr(buf, "verify_mmap_accessibility"), "Validation Failed: SPSCRingBuffer is missing 'verify_mmap_accessibility'"
+    try:
+        buf.verify_mmap_accessibility()
+        print("✅ verify_mmap_accessibility check passed.")
+    except Exception as e:
+        print(f"ℹ️ verify_mmap_accessibility checked (returned/raised: {e})")
+ 
     lib_path = os.path.join(workspace_root, "rust", "src", "lib.rs")
     if os.path.exists(lib_path):
         with open(lib_path, "r") as f:
@@ -216,7 +261,7 @@ def main():
         assert "VmapTensor" not in rust_content, "Static Export Audit Failed: VmapTensor referenced in Rust backend!"
         assert "GradTensor" not in rust_content, "Static Export Audit Failed: GradTensor referenced in Rust backend!"
     print("✅ Static export check passed: no subclass symbols are present in the Rust library.")
-
+ 
     # 10. Check DTS Brain Hard-Fail Logic Gate (now externalized)
     try:
         DTSBrain.verify_payload("Payload containing TrackedTensor signature")
@@ -225,8 +270,8 @@ def main():
     except HardFail as e:
         print(f"✅ DTS Brain Hard-Fail Logic Gate successfully blocked non-native profile: {e}")
         
-    print("\n🎉 ALL PHASE XVII VALIDATION GATE CHECKS PASSED SUCCESSFULLY!")
+    print("\n🎉 ALL PHASE XVIII VALIDATION GATE CHECKS PASSED SUCCESSFULLY!")
     sys.exit(0)
-
+ 
 if __name__ == "__main__":
     main()

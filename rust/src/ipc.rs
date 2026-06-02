@@ -146,6 +146,39 @@ impl SPSCRingBuffer {
         }
     }
 
+    pub fn verify_mmap_accessibility(&self) -> PyResult<bool> {
+        if !self.is_mmap || self.raw_ptr.is_null() {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Validation Failed: Shared memory segment is not actively instantiated and mapped!"
+            ));
+        }
+        
+        unsafe {
+            // Verify readability and writability of head and tail atomic fields
+            let layout = &*self.raw_ptr;
+            let head = layout.head.load(Ordering::Acquire);
+            layout.head.store(head, Ordering::Release);
+            
+            // Check accessibility of the buffer pages using mincore (Linux only) or a dry read/write
+            #[cfg(target_os = "linux")]
+            {
+                let mut vec: u8 = 0;
+                let size = std::mem::size_of::<SPSCRingBufferLayout>();
+                let res = libc::mincore(
+                    self.raw_ptr as *mut libc::c_void,
+                    size,
+                    &mut vec as *mut u8,
+                );
+                if res != 0 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "Validation Failed: Shared memory segment page is not resident/accessible!"
+                    ));
+                }
+            }
+        }
+        Ok(true)
+    }
+
     pub fn push(&self, op_code: u32, device_id: u32, payload_bytes: Vec<u8>) -> PyResult<()> {
         if !self.is_mmap {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
