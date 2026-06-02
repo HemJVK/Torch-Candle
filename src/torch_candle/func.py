@@ -234,15 +234,6 @@ def grad(func, argnums=0):
             diff = Tensor([1.0], device=x.device)
             x_grad = Tensor(x._tensor.to_grad_tensor(diff._tensor))
             
-            # Wrap in subclass based on active AD level
-            active_level = _kernels.get_active_ad_level()
-            if active_level == 1:
-                from torch_candle.tensor import Level0Tensor
-                x_grad = Level0Tensor(x_grad)
-            elif active_level >= 2:
-                from torch_candle.tensor import Level1Tensor
-                x_grad = Level1Tensor(x_grad)
-            
             new_args = list(args)
             new_args[argnums] = x_grad
             
@@ -477,15 +468,6 @@ def jacrev(func, argnums=0):
             x = args[argnums]
             diff = Tensor([1.0], device=x.device)
             x_grad = Tensor(x._tensor.to_grad_tensor(diff._tensor))
-            
-            # Wrap in subclass based on active AD level
-            active_level = _kernels.get_active_ad_level()
-            if active_level == 1:
-                from torch_candle.tensor import Level0Tensor
-                x_grad = Level0Tensor(x_grad)
-            elif active_level >= 2:
-                from torch_candle.tensor import Level1Tensor
-                x_grad = Level1Tensor(x_grad)
             
             new_args = list(args)
             new_args[argnums] = x_grad

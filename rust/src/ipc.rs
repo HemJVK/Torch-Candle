@@ -5,26 +5,58 @@ use pyo3::prelude::*;
 #[derive(Copy, Clone, Debug)]
 #[pyclass]
 pub struct TaskMetadata {
-    #[pyo3(get)]
+    #[pyo3(get, set)]
     pub op_code: u32,
-    #[pyo3(get)]
-    pub device_id: u32,
-    #[pyo3(get)]
-    pub input_size: u64,
-    #[pyo3(get)]
-    pub output_size: u64,
-    #[pyo3(get)]
-    pub payload: [u8; 256],
+    #[pyo3(get, set)]
+    pub tensor_id: u64,
+    #[pyo3(get, set)]
+    pub data_buffer: [u8; 4096],
+    #[pyo3(get, set)]
+    pub metadata_flat: [f32; 128],
+    #[pyo3(get, set)]
+    pub padding: [u8; 128],
 }
 
 impl Default for TaskMetadata {
     fn default() -> Self {
         Self {
             op_code: 0,
-            device_id: 0,
-            input_size: 0,
-            output_size: 0,
-            payload: [0; 256],
+            tensor_id: 0,
+            data_buffer: [0; 4096],
+            metadata_flat: [0.0; 128],
+            padding: [0; 128],
+        }
+    }
+}
+
+#[pymethods]
+impl TaskMetadata {
+    #[new]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[getter]
+    pub fn device_id(&self) -> u32 {
+        self.tensor_id as u32
+    }
+
+    #[setter]
+    pub fn set_device_id(&mut self, val: u32) {
+        self.tensor_id = val as u64;
+    }
+
+    #[getter]
+    pub fn payload(&self) -> Vec<u8> {
+        self.data_buffer[..256].to_vec()
+    }
+
+    #[setter]
+    pub fn set_payload(&mut self, val: Vec<u8>) {
+        let copy_len = val.len().min(256);
+        self.data_buffer[..copy_len].copy_from_slice(&val[..copy_len]);
+        for i in copy_len..256 {
+            self.data_buffer[i] = 0;
         }
     }
 }
@@ -65,7 +97,7 @@ impl SPSCRingBuffer {
         let path = "/dev/shm/torch_candle_ipc";
         unsafe {
             let path_cstr = std::ffi::CString::new(path).unwrap();
-            let fd = libc::open(path_cstr.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o666);
+            let fd = libc::open(path_cstr.as_ptr(), libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC, 0o666);
             if fd >= 0 {
                 let size = std::mem::size_of::<SPSCRingBufferLayout>();
                 libc::ftruncate(fd, size as libc::off_t);
@@ -89,18 +121,18 @@ impl SPSCRingBuffer {
             }
         }
 
-        // Fallback to heap allocation
-        let layout = Box::new(SPSCRingBufferLayout {
-            head: AtomicUsize::new(0),
-            padding: [0; 128],
-            tail: AtomicUsize::new(0),
-            buffer: [TaskMetadata::default(); 1024],
-        });
-        let raw_ptr = Box::into_raw(layout);
-        Self {
-            raw_ptr,
-            is_owner: true,
-            is_mmap: false,
+        // Fallback to heap allocation using std::alloc to avoid stack overflow
+        unsafe {
+            let layout = std::alloc::Layout::new::<SPSCRingBufferLayout>();
+            let raw_ptr = std::alloc::alloc_zeroed(layout) as *mut SPSCRingBufferLayout;
+            if raw_ptr.is_null() {
+                std::alloc::handle_alloc_error(layout);
+            }
+            Self {
+                raw_ptr,
+                is_owner: true,
+                is_mmap: false,
+            }
         }
     }
 
@@ -162,12 +194,14 @@ impl SPSCRingBuffer {
             // Check accessibility of the buffer pages using mincore (Linux only) or a dry read/write
             #[cfg(target_os = "linux")]
             {
-                let mut vec: u8 = 0;
                 let size = std::mem::size_of::<SPSCRingBufferLayout>();
+                let page_size = 4096;
+                let pages = (size + page_size - 1) / page_size;
+                let mut vec = vec![0u8; pages];
                 let res = libc::mincore(
                     self.raw_ptr as *mut libc::c_void,
                     size,
-                    &mut vec as *mut u8,
+                    vec.as_mut_ptr(),
                 );
                 if res != 0 {
                     return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -221,16 +255,16 @@ impl SPSCRingBuffer {
         }
         
         let index = head % 1024;
-        let mut payload = [0u8; 256];
-        let copy_len = payload_bytes.len().min(256);
-        payload[..copy_len].copy_from_slice(&payload_bytes[..copy_len]);
+        let mut data_buffer = [0u8; 4096];
+        let copy_len = payload_bytes.len().min(4096);
+        data_buffer[..copy_len].copy_from_slice(&payload_bytes[..copy_len]);
         
         layout.buffer[index] = TaskMetadata {
             op_code,
-            device_id,
-            input_size: 0,
-            output_size: 0,
-            payload,
+            tensor_id: device_id as u64,
+            data_buffer,
+            metadata_flat: [0.0; 128],
+            padding: [0; 128],
         };
         
         layout.head.store(head.wrapping_add(1), Ordering::Release);
@@ -374,12 +408,13 @@ impl SPSCRingBuffer {
 
 impl Drop for SPSCRingBuffer {
     fn drop(&mut self) {
-        if self.is_owner {
+        if self.is_owner && !self.raw_ptr.is_null() {
             unsafe {
                 if self.is_mmap {
                     libc::munmap(self.raw_ptr as *mut libc::c_void, std::mem::size_of::<SPSCRingBufferLayout>());
                 } else {
-                    let _ = Box::from_raw(self.raw_ptr);
+                    let layout = std::alloc::Layout::new::<SPSCRingBufferLayout>();
+                    std::alloc::dealloc(self.raw_ptr as *mut u8, layout);
                 }
             }
         }

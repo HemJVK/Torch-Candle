@@ -1,27 +1,50 @@
 import os
 import pickle
+import sys
 import torch_candle_backend as _kernels
+import torch_candle as torch
 
-import torch
+# Load the C++ dynamic JIT extension if possible
+try:
+    import torch.utils.cpp_extension as cpp_extension
+    # Enforce having .venv/bin in PATH during compilation so ninja is resolved
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+    venv_bin = os.path.join(workspace_root, ".venv", "bin")
+    if os.path.exists(venv_bin) and venv_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = f"{venv_bin}{os.path.pathsep}{os.environ.get('PATH', '')}"
+        
+    csrc_dir = os.path.join(os.path.dirname(current_dir), "csrc")
+    cpp_file = os.path.join(csrc_dir, "jit_compiler.cpp")
+    
+    torch_candle_cpp = cpp_extension.load(
+        name="torch_candle_cpp",
+        sources=[cpp_file],
+        verbose=False
+    )
+    JITCompiledFunction = torch_candle_cpp.JITCompiledFunction
+except Exception as e:
+    # Print warning but keep Python fallback
+    print(f"⚠️ [JIT Compiler] C++ dynamic JIT load failed: {e}. Using Python JIT fallback.")
+    class JITCompiledFunction:
+        def __init__(self, expr):
+            self.expr = expr
+        def forward(self, inputs, input_names):
+            env = {name: val for name, val in zip(input_names, inputs)}
+            globals_dict = {
+                "__builtins__": None,
+                "sin": torch.sin,
+                "cos": torch.cos,
+                "exp": torch.exp,
+                "log": torch.log,
+                "sigmoid": torch.sigmoid,
+                "relu": torch.relu,
+                "tanh": torch.tanh,
+            }
+            return eval(self.expr, globals_dict, env)
+        def backward(self, inputs, input_names, grad_output):
+            raise NotImplementedError("C++ JIT Autograd required for backward pass.")
 
-class JITCompiledFunction:
-    def __init__(self, expr):
-        self.expr = expr
-    def forward(self, inputs, input_names):
-        env = {name: val for name, val in zip(input_names, inputs)}
-        globals_dict = {
-            "__builtins__": None,
-            "sin": torch.sin,
-            "cos": torch.cos,
-            "exp": torch.exp,
-            "log": torch.log,
-            "sigmoid": torch.sigmoid,
-            "relu": torch.relu,
-            "tanh": torch.tanh,
-        }
-        return eval(self.expr, globals_dict, env)
-    def backward(self, inputs, input_names, grad_output):
-        raise NotImplementedError("C++ JIT Autograd required for backward pass.")
 
 
 class ScriptModule:
