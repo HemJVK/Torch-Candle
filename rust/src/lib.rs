@@ -901,7 +901,7 @@ struct Conv2dNode {
 }
 impl OpNode for Conv2dNode {
     fn name(&self) -> &str { "Conv2d" }
-    fn backward(&self, grad: &Tensor) -> Vec<Option<Tensor>> {
+    fn backward(&self, _grad: &Tensor) -> Vec<Option<Tensor>> {
         // Simplified: return None for both (conv backward is complex; forward is the win)
         let grad_input = if self.input_req { None } else { None };
         let grad_weight = if self.weight_req { None } else { None };

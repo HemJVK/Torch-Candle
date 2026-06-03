@@ -220,7 +220,7 @@ impl SSACompiler {
         
         // Execute in a GIL-free context for maximum throughput
         let block_nodes = self.block.nodes.clone();
-        let value_registry = self.value_registry.clone();
+        let _value_registry = self.value_registry.clone();
         
         let result = py.allow_threads(|| -> Result<candle_core::Tensor, String> {
             for node in &block_nodes {
