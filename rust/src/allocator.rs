@@ -46,6 +46,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[pyclass]
 pub struct StreamAwareAllocator {
     blocks: Mutex<HashMap<usize, AllocationBlock>>,
+    #[allow(dead_code)]
     event_queue: Mutex<VecDeque<StreamEvent>>,
     free_queue: Mutex<VecDeque<(StreamEvent, usize)>>,
     next_ptr: Mutex<usize>,

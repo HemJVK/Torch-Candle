@@ -653,6 +653,7 @@ impl NativeASTParser {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub enum SymExpr {
     Var,
@@ -663,6 +664,7 @@ pub enum SymExpr {
     Pow(Box<SymExpr>, f64),
 }
 
+#[allow(dead_code)]
 impl SymExpr {
     fn diff(&self) -> Self {
         match self {

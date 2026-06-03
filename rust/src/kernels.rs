@@ -343,6 +343,7 @@ pub fn fast_adam_step(
         });
 }
 
+#[allow(dead_code)]
 pub fn fast_adamw_step(
     mut param: ArrayViewMutD<'_, f32>,
     grad: &[f32],

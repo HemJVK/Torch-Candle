@@ -19,6 +19,7 @@ struct CudaIpcMemHandle {
     reserved: [u8; 64],
 }
 
+#[allow(dead_code)]
 struct CudaIpcLib {
     cuda_ipc_get_mem_handle: unsafe extern "C" fn(*mut u8, *const std::ffi::c_void) -> i32,
     cuda_ipc_open_mem_handle: unsafe extern "C" fn(*mut *mut std::ffi::c_void, CudaIpcMemHandle, u32) -> i32,
@@ -64,7 +65,9 @@ mod ipc;
 mod allocator;
 mod jit;
 
+#[allow(dead_code)]
 static ENABLE_SHA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+#[allow(dead_code)]
 static GRAD_HISTORY: Mutex<Option<HashMap<usize, Vec<f32>>>> = Mutex::new(None);
 
 thread_local! {
@@ -683,6 +686,7 @@ impl OpNode for ClampNode {
         vec![Some(grad.broadcast_mul(&mask).unwrap())]
     }
 }
+#[allow(dead_code)]
 struct NarrowNode {
     dim: usize,
     start: usize,
@@ -891,6 +895,7 @@ impl OpNode for LogSoftmaxNode {
     }
 }
 
+#[allow(dead_code)]
 struct Conv2dNode {
     input: Tensor,
     weight: Tensor,
@@ -2257,6 +2262,7 @@ impl PyTensor {
         }
     }
 
+    #[allow(dead_code)]
     fn broadcast_to_same_rank(&self, other: &Tensor) -> PyResult<(Tensor, Tensor)> {
         let lhs_shape = self.inner.dims();
         let rhs_shape = other.dims();
@@ -2689,7 +2695,6 @@ fn subclass_dispatch(
         if let Some(kw) = kwargs {
             for (_, val) in kw.iter() {
                 if val.is_instance(&tensor_class)? && !val.get_type().is(&tensor_class) {
-                    has_subclass = true;
                     subclass_arg = Some(val.clone());
                     break;
                 }
