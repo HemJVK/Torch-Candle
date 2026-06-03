@@ -546,8 +546,8 @@ public:
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::class_<JITCompiledFunction>(m, "JITCompiledFunction")
         .def(py::init<std::string>())
-        .def("forward", &JITCompiledFunction::forward)
-        .def("backward", &JITCompiledFunction::backward);
+        .def("forward", &JITCompiledFunction::forward, py::call_guard<py::gil_scoped_release>())
+        .def("backward", &JITCompiledFunction::backward, py::call_guard<py::gil_scoped_release>());
 
     py::class_<BatchTensor0_cpp>(m, "BatchTensor0_cpp")
         .def(py::init<at::Tensor, int>())

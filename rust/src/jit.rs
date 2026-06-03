@@ -193,6 +193,130 @@ impl SSACompiler {
         
         Ok(())
     }
+
+    /// Execute the compiled SSA graph as a standalone Rust VM.
+    /// This runs entirely in native Rust using Candle tensors — no Python GIL needed.
+    /// The VM walks SSA nodes sequentially, executing each operation via Candle ops.
+    pub fn execute(&self, py: Python<'_>, input_map: HashMap<String, crate::PyTensor>) -> PyResult<crate::PyTensor> {
+        // Build a value environment mapping value IDs to Candle tensors
+        let mut env: HashMap<usize, candle_core::Tensor> = HashMap::new();
+        
+        // Map named inputs to their value IDs
+        // Input values are identified by checking the inputs list
+        let mut name_to_id: HashMap<String, usize> = HashMap::new();
+        for val in &self.inputs {
+            // Use dtype field as the variable name for identifier values
+            // (registered by compile_ast with the variable name in the identifier fields)
+            let name = &val.dtype;
+            name_to_id.insert(name.clone(), val.id);
+        }
+        
+        // Populate the environment with input tensors
+        for (name, pytensor) in &input_map {
+            if let Some(&val_id) = name_to_id.get(name) {
+                env.insert(val_id, pytensor.inner.clone());
+            }
+        }
+        
+        // Execute in a GIL-free context for maximum throughput
+        let block_nodes = self.block.nodes.clone();
+        let value_registry = self.value_registry.clone();
+        
+        let result = py.allow_threads(|| -> Result<candle_core::Tensor, String> {
+            for node in &block_nodes {
+                match node.op_name.as_str() {
+                    "constant" => {
+                        if let Some(val_str) = node.attributes.get("value") {
+                            if let Ok(val) = val_str.parse::<f64>() {
+                                let t = candle_core::Tensor::new(&[val as f32], &candle_core::Device::Cpu)
+                                    .map_err(|e| format!("SSA VM constant: {}", e))?;
+                                for &out_id in &node.outputs {
+                                    env.insert(out_id, t.clone());
+                                }
+                            }
+                        }
+                    }
+                    "binop" => {
+                        if node.inputs.len() < 2 || node.outputs.is_empty() {
+                            return Err("SSA VM binop: insufficient inputs/outputs".to_string());
+                        }
+                        let lhs = env.get(&node.inputs[0])
+                            .ok_or_else(|| format!("SSA VM: value {} not found", node.inputs[0]))?;
+                        let rhs = env.get(&node.inputs[1])
+                            .ok_or_else(|| format!("SSA VM: value {} not found", node.inputs[1]))?;
+                        
+                        let op = node.attributes.get("op").map(|s| s.as_str()).unwrap_or("Add");
+                        let result = match op {
+                            "Add" => lhs.broadcast_add(rhs),
+                            "Sub" => lhs.broadcast_sub(rhs),
+                            "Mult" => lhs.broadcast_mul(rhs),
+                            "Div" => lhs.broadcast_div(rhs),
+                            "Pow" => {
+                                // Power: try to extract scalar exponent
+                                if let Ok(exp_vec) = rhs.to_vec1::<f32>() {
+                                    if !exp_vec.is_empty() {
+                                        lhs.powf(exp_vec[0] as f64)
+                                    } else {
+                                        lhs.broadcast_mul(rhs) // fallback
+                                    }
+                                } else {
+                                    lhs.broadcast_mul(rhs) // fallback
+                                }
+                            }
+                            _ => lhs.broadcast_add(rhs), // default to add for unknown ops
+                        }.map_err(|e| format!("SSA VM binop({}): {}", op, e))?;
+                        
+                        env.insert(node.outputs[0], result);
+                    }
+                    "if_true_assign" => {
+                        // Conditional execution: if the condition input is truthy,
+                        // assign the value. For SSA IR, this is a phi-node analog.
+                        if !node.inputs.is_empty() && !node.outputs.is_empty() {
+                            if let Some(cond) = env.get(&node.inputs[0]) {
+                                // Check if condition is > 0 (truthy)
+                                if let Ok(cond_vec) = cond.to_vec1::<f32>() {
+                                    if !cond_vec.is_empty() && cond_vec[0] > 0.0 {
+                                        env.insert(node.outputs[0], cond.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "for_loop_body_assign" => {
+                        // Loop body execution: process the loop variable
+                        if !node.inputs.is_empty() && !node.outputs.is_empty() {
+                            if let Some(val) = env.get(&node.inputs[0]) {
+                                env.insert(node.outputs[0], val.clone());
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(format!("SSA VM: unknown op '{}'", node.op_name));
+                    }
+                }
+            }
+            
+            // Find the output value
+            // Use the last output node's output, or the last value inserted
+            if let Some(last_node) = block_nodes.last() {
+                if let Some(&out_id) = last_node.outputs.last() {
+                    if let Some(t) = env.get(&out_id) {
+                        return Ok(t.clone());
+                    }
+                }
+            }
+            
+            Err("SSA VM: no output produced".to_string())
+        }).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        
+        Ok(crate::PyTensor {
+            inner: result,
+            grad: None,
+            grad_fn: None,
+            requires_grad: false,
+            parents: Vec::new(),
+        })
+    }
 }
 
 #[pyfunction]

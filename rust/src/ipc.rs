@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use pyo3::prelude::*;
+use pyo3::ffi;
+use std::os::raw::c_int;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -225,23 +227,34 @@ impl SPSCRingBuffer {
     }
 
     unsafe fn __getbuffer__(
-        &self,
-        view: *mut pyo3::ffi::Py_buffer,
-        flags: std::os::raw::c_int,
+        slf: pyo3::Bound<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: c_int,
     ) -> PyResult<()> {
         let size = std::mem::size_of::<SPSCRingBufferLayout>();
-        pyo3::ffi::PyBuffer_FillInfo(
+        let self_ref = slf.borrow();
+        // Pass the owning Python object as `obj` per PEP 3118 — never null.
+        // This ensures Python's refcount keeps the buffer alive while the view exists.
+        let obj_ptr = slf.as_ptr();
+        let ret = ffi::PyBuffer_FillInfo(
             view,
-            std::ptr::null_mut(),
-            self.raw_ptr as *mut std::ffi::c_void,
+            obj_ptr,
+            self_ref.raw_ptr as *mut std::ffi::c_void,
             size as isize,
-            0,
+            0,  // writable
             flags,
         );
+        if ret < 0 {
+            return Err(PyErr::fetch(slf.py()));
+        }
+        // PyBuffer_FillInfo already calls Py_INCREF on obj when obj is non-null
         Ok(())
     }
 
-    unsafe fn __releasebuffer__(&self, _view: *mut pyo3::ffi::Py_buffer) {}
+    unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {
+        // PyBuffer_Release handles Py_DECREF on obj automatically.
+        // No manual cleanup required for our contiguous flat buffer.
+    }
 }
 
 impl SPSCRingBuffer {

@@ -145,16 +145,17 @@ Torch-Candle includes two dedicated CLI scripts to verify your hardware configur
     python3 tests/test_self_healing_demo.py
     ```
 
-## 🔧 Distributed Execution Kernel Settings
-Distributed execution under high concurrency loads can fail due to OS-level limits on memory map zones and standard malloc allocations. Enforce the following settings on your Linux host:
+## 🔧 Memory Allocation Tuning (Linux)
+To prevent glibc memory arena fragmentation under high concurrency, Torch-Candle automatically sets `MALLOC_MMAP_THRESHOLD_=65536` on import, which forces glibc to use `mmap` instead of heap arenas for allocations above 64KB. This eliminates OOM fragmentation without requiring root privileges.
+
+If launching from a shell script, you can also set this before the process boots:
 ```bash
-# Increase memory map limit to prevent distributed allocator failures (resolves issue #112470)
-sudo sysctl -w vm.max_map_count=262144
+# Force glibc to use mmap for allocations ≥ 64KB (prevents arena fragmentation)
+export MALLOC_MMAP_THRESHOLD_=65536
+python train.py
 ```
-To persist this setting, append the following line to `/etc/sysctl.conf`:
-```
-vm.max_map_count=262144
-```
+
+> **Note:** Do **not** use `sysctl` or modify `/etc/sysctl.conf` for memory tuning — this requires root privileges and targets the wrong kernel parameter.
 
 ---
 

@@ -97,3 +97,45 @@ extern "C" void launch_conv2d(const float* input, const float* weight, float* ou
                        input, weight, output, N, C, H, W, K, kh, kw, sy, sx, py, px, out_h, out_w);
     hipDeviceSynchronize();
 }
+
+__global__ void elementwise_add_kernel(const float* A, const float* B, float* C, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < N) {
+        C[idx] = A[idx] + B[idx];
+    }
+}
+
+__global__ void elementwise_mul_kernel(const float* A, const float* B, float* C, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < N) {
+        C[idx] = A[idx] * B[idx];
+    }
+}
+
+__global__ void elementwise_sub_kernel(const float* A, const float* B, float* C, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < N) {
+        C[idx] = A[idx] - B[idx];
+    }
+}
+
+extern "C" void launch_elementwise_add(const float* A, const float* B, float* C, int N) {
+    int threads = 256;
+    int blocks = (N + threads - 1) / threads;
+    hipLaunchKernelGGL(elementwise_add_kernel, dim3(blocks), dim3(threads), 0, 0, A, B, C, N);
+    hipDeviceSynchronize();
+}
+
+extern "C" void launch_elementwise_mul(const float* A, const float* B, float* C, int N) {
+    int threads = 256;
+    int blocks = (N + threads - 1) / threads;
+    hipLaunchKernelGGL(elementwise_mul_kernel, dim3(blocks), dim3(threads), 0, 0, A, B, C, N);
+    hipDeviceSynchronize();
+}
+
+extern "C" void launch_elementwise_sub(const float* A, const float* B, float* C, int N) {
+    int threads = 256;
+    int blocks = (N + threads - 1) / threads;
+    hipLaunchKernelGGL(elementwise_sub_kernel, dim3(blocks), dim3(threads), 0, 0, A, B, C, N);
+    hipDeviceSynchronize();
+}

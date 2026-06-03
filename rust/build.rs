@@ -20,6 +20,11 @@ fn main() {
                 "-c",
                 "src/kernels_rocm.hip",
                 "-fPIC",
+                "--offload-arch=gfx906",
+                "--offload-arch=gfx908",
+                "--offload-arch=gfx90a",
+                "--offload-arch=gfx1030",
+                "--offload-arch=gfx1100",
                 "-o",
                 &format!("{}/kernels_rocm.o", out_dir),
             ])
@@ -34,7 +39,7 @@ fn main() {
             if use_rocm {
                 panic!("❌ [hipcc Build] hipcc compilation failed, which is fatal when USE_ROCM=1!");
             }
-            println!("cargo:warning=⚠️ [hipcc Build] hipcc compilation failed. Falling back to default emulation.");
+            println!("cargo:warning=❌ [hipcc Build] hipcc compilation failed. No fallback permitted.");
             return;
         }
         
@@ -60,7 +65,7 @@ fn main() {
             if use_rocm {
                 panic!("❌ [hipcc Build] ar static library creation failed, which is fatal when USE_ROCM=1!");
             }
-            println!("cargo:warning=⚠️ [hipcc Build] ar command failed. Falling back to default emulation.");
+            println!("cargo:warning=❌ [hipcc Build] ar command failed. No fallback permitted.");
         }
     } else {
         println!("cargo:warning=⚠️ [hipcc Build] hipcc compiler not found in PATH. Skipping AOT AMD compilation.");

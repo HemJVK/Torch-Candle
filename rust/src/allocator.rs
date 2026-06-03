@@ -21,8 +21,13 @@ impl StreamEvent {
     }
 
     pub fn query(&self) -> bool {
-        // GPU event completion check. Natively true in CPU fallback.
-        true
+        // Check actual event completion state.
+        // On real GPU hardware, this would query cudaEventQuery/hipEventQuery.
+        self.is_complete
+    }
+
+    pub fn mark_complete(&mut self) {
+        self.is_complete = true;
     }
 }
 
@@ -98,11 +103,32 @@ impl StreamAwareAllocator {
         let mut blocks = self.blocks.lock().unwrap();
         self.process_delayed_frees_internal(&mut blocks);
         
-        // Updated to support cross-stream/cross-tag reuse (Stream-Aware Allocation)
+        // Stream-Aware Allocation: only reuse blocks where ALL recorded streams have completed.
         for block in blocks.values_mut() {
             if block.is_idle && block.size >= size {
-                // blockFree: block is safe for reuse since all recorded streams are completed in our CPU model.
-                if block.recorded_streams.is_empty() || block.recorded_streams.contains(&stream_id) {
+                // A block is safe to reuse ONLY if:
+                // 1. It has no recorded cross-stream dependencies, OR
+                // 2. ALL recorded stream events have completed, OR
+                // 3. The requesting stream is the same as the block's owning stream
+                let safe_to_reuse = if block.recorded_streams.is_empty() {
+                    true
+                } else if block.recorded_streams.contains(&stream_id) && block.recorded_streams.len() == 1 {
+                    // Same stream — safe (stream ordering guarantees completion)
+                    true
+                } else {
+                    // Cross-stream reuse: check that all recorded stream events have been processed
+                    // via the delayed-free queue (events marked complete)
+                    let free_queue = self.free_queue.lock().unwrap();
+                    let all_complete = block.recorded_streams.iter().all(|&sid| {
+                        // If there are no pending events for this stream in the free queue,
+                        // it means all prior events on that stream have completed
+                        !free_queue.iter().any(|(evt, _)| evt.stream_id == sid && !evt.is_complete)
+                    });
+                    drop(free_queue);
+                    all_complete
+                };
+                
+                if safe_to_reuse {
                     println!("🚀 [StreamAwareAllocator] blockFree: Reusing block address 0x{:x} from stream {} (now stream {})", block.ptr, block.stream_id, stream_id);
                     block.is_idle = false;
                     block.stream_id = stream_id;
@@ -135,10 +161,14 @@ impl StreamAwareAllocator {
         let event_id = *next_event_id;
         *next_event_id += 1;
         
+        // On CPU: events complete synchronously (no async GPU stream).
+        // On real GPU hardware: is_complete would start as `false` and be
+        // set to `true` only when cudaEventQuery/hipEventQuery confirms
+        // the stream has finished processing all prior work.
         let event = StreamEvent {
             stream_id,
             event_id,
-            is_complete: false,
+            is_complete: true, // CPU-mode: synchronous completion
         };
         
         let mut free_queue = self.free_queue.lock().unwrap();
@@ -149,8 +179,19 @@ impl StreamAwareAllocator {
         Ok(())
     }
 
-    pub fn record_stream(&self, _ptr: usize, _stream_id: u32) -> PyResult<()> {
-        Ok(())
+    pub fn record_stream(&self, ptr: usize, stream_id: u32) -> PyResult<()> {
+        let mut blocks = self.blocks.lock().unwrap();
+        if let Some(block) = blocks.get_mut(&ptr) {
+            if !block.recorded_streams.contains(&stream_id) {
+                block.recorded_streams.push(stream_id);
+                println!("🚀 [StreamAwareAllocator] record_stream: Block 0x{:x} now tracked on stream {}", ptr, stream_id);
+            }
+            Ok(())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                format!("record_stream: Block 0x{:x} not found in allocator. Cannot record stream dependency.", ptr)
+            ))
+        }
     }
 
     pub fn cuda_free(&self, ptr: usize) -> PyResult<()> {
