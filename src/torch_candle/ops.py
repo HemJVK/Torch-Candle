@@ -168,28 +168,23 @@ def sign(input, out=None):
 # ─── floor/ceil/round — numpy fallback (no candle equivalent) ─────────────────
 
 def floor(input, out=None):
-    t = _wrap(input)
-    return Tensor(np.floor(_np(t)).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of floor is required.")
 
 
 def ceil(input, out=None):
-    t = _wrap(input)
-    return Tensor(np.ceil(_np(t)).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of ceil is required.")
 
 
 def round(input, decimals=0, out=None):
-    t = _wrap(input)
-    return Tensor(np.round(_np(t), decimals=decimals).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of round is required.")
 
 
 def trunc(input, out=None):
-    t = _wrap(input)
-    return Tensor(np.trunc(_np(t)).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of trunc is required.")
 
 
 def frac(input, out=None):
-    t = _wrap(input)
-    return t - trunc(t)
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of frac is required.")
 
 
 # ─── Trigonometry — candle-native where possible ─────────────────────────────
@@ -208,29 +203,29 @@ def tan(input, out=None):
 
 
 def asin(input, out=None):        # numpy fallback
-    return Tensor(np.arcsin(_np(_wrap(input))).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of asin is required.")
 
 
 def acos(input, out=None):        # numpy fallback
-    return Tensor(np.arccos(_np(_wrap(input))).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of acos is required.")
 
 
 def atan(input, out=None):        # numpy fallback
-    return Tensor(np.arctan(_np(_wrap(input))).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of atan is required.")
 
 
 def atan2(input, other, out=None):  # numpy fallback
-    return Tensor(np.arctan2(_np(_wrap(input)), _np(_wrap(other))).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of atan2 is required.")
 
 arctan2 = atan2
 
 
 def sinh(input, out=None):         # numpy fallback
-    return Tensor(np.sinh(_np(_wrap(input))).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of sinh is required.")
 
 
 def cosh(input, out=None):         # numpy fallback
-    return Tensor(np.cosh(_np(_wrap(input))).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of cosh is required.")
 
 
 def tanh(input, out=None):
@@ -238,15 +233,15 @@ def tanh(input, out=None):
 
 
 def asinh(input, out=None):        # numpy fallback
-    return Tensor(np.arcsinh(_np(_wrap(input))).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of asinh is required.")
 
 
 def acosh(input, out=None):        # numpy fallback
-    return Tensor(np.arccosh(_np(_wrap(input))).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of acosh is required.")
 
 
 def atanh(input, out=None):        # numpy fallback
-    return Tensor(np.arctanh(_np(_wrap(input))).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of atanh is required.")
 
 
 # ─── Activations ─────────────────────────────────────────────────────────────
@@ -265,8 +260,7 @@ def clamp(input, min=None, max=None, out=None):
     t = _wrap(input)
     if min is not None and max is not None:
         return t._fast_wrap(t._tensor.clamp(_builtins.float(min), _builtins.float(max)))
-    # one-sided clamp: numpy fallback
-    return Tensor(np.clip(_np(t), min, max).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: One-sided clamp is not implemented natively.")
 
 
 clip = clamp
@@ -290,11 +284,7 @@ def erf(input, out=None):
 
 
 def erfinv(input):               # numpy fallback
-    x  = _np(_wrap(input))
-    a  = 8.0 * (np.pi - 3.0) / (3.0 * np.pi * (4.0 - np.pi))
-    ln = np.log(1.0 - x**2 + 1e-7)
-    t1 = 2.0 / (np.pi * a) + ln / 2.0
-    return Tensor((np.sign(x) * np.sqrt(np.sqrt(t1**2 - ln / a) - t1)).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of erfinv is required.")
 
 
 # ─── LOGICAL OPS — numpy fallback (bool ops not in candle) ───────────────────
@@ -304,15 +294,15 @@ def logical_not(input, out=None):
 
 
 def logical_and(input, other, out=None):
-    return Tensor(np.logical_and(_np(_wrap(input)), _np(_wrap(other))).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of logical_and is required.")
 
 
 def logical_or(input, other, out=None):
-    return Tensor(np.logical_or(_np(_wrap(input)), _np(_wrap(other))).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of logical_or is required.")
 
 
 def logical_xor(input, other, out=None):
-    return Tensor(np.logical_xor(_np(_wrap(input)), _np(_wrap(other))).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of logical_xor is required.")
 
 
 # ─── REDUCTIONS ──────────────────────────────────────────────────────────────
@@ -326,11 +316,7 @@ def mean(input, dim=None, keepdim=False, dtype=None, out=None):
 
 
 def prod(input, dim=None, keepdim=False, dtype=None, out=None):
-    # numpy fallback (candle has no product reduction)
-    t = _wrap(input)
-    if dim is None:
-        return Tensor(float(np.prod(_np(t))).real)
-    return Tensor(np.prod(_np(t), axis=dim, keepdims=keepdim).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of prod is required.")
 
 
 def std(input, dim=None, correction=1, keepdim=False, out=None):
@@ -345,8 +331,7 @@ def std(input, dim=None, correction=1, keepdim=False, out=None):
         n    = t.numel()
         var_val = sq.sum() * (1.0 / _builtins.max(1, n - ddof))
         return var_val.sqrt()
-    # numpy fallback for dim-wise (acceptable; not hot path)
-    return Tensor(np.std(_np(t), axis=dim, ddof=ddof, keepdims=keepdim).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of dim-wise std is required.")
 
 
 def var(input, dim=None, correction=1, keepdim=False, out=None):
@@ -358,7 +343,7 @@ def var(input, dim=None, correction=1, keepdim=False, out=None):
         diff    = t - mu
         n       = t.numel()
         return (diff * diff).sum() * (1.0 / _builtins.max(1, n - ddof))
-    return Tensor(np.var(_np(t), axis=dim, ddof=ddof, keepdims=keepdim).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of dim-wise var is required.")
 
 
 def max(input, dim=None, keepdim=False, out=None):
@@ -369,10 +354,7 @@ def max(input, dim=None, keepdim=False, out=None):
         for d in range(len(t.shape) - 1, -1, -1):
             res = res.max_keepdim(d)
         return Tensor(res)
-    # numpy for (values, indices) tuple
-    vals = Tensor(np.max(_np(t), axis=dim, keepdims=keepdim).astype(np.float32))
-    idxs = Tensor(np.argmax(_np(t), axis=dim).astype(np.float32))
-    return vals, idxs
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of dim-wise max is required.")
 
 
 def min(input, dim=None, keepdim=False, out=None):
@@ -382,15 +364,13 @@ def min(input, dim=None, keepdim=False, out=None):
         for d in range(len(t.shape) - 1, -1, -1):
             res = res.min_keepdim(d)
         return Tensor(res)
-    vals = Tensor(np.min(_np(t), axis=dim, keepdims=keepdim).astype(np.float32))
-    idxs = Tensor(np.argmin(_np(t), axis=dim).astype(np.float32))
-    return vals, idxs
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of dim-wise min is required.")
 
 
 def argmax(input, dim=None, keepdim=False):
     t = _wrap(input)
     if dim is None:
-        return Tensor(float(np.argmax(_np(t))))
+        raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of argmax (dim=None) is required.")
     raw = t._tensor.argmax_keepdim(dim)
     if not keepdim:
         raw = raw.squeeze(dim)
@@ -400,7 +380,7 @@ def argmax(input, dim=None, keepdim=False):
 def argmin(input, dim=None, keepdim=False):
     t = _wrap(input)
     if dim is None:
-        return Tensor(float(np.argmin(_np(t))))
+        raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of argmin (dim=None) is required.")
     raw = t._tensor.argmin_keepdim(dim)
     if not keepdim:
         raw = raw.squeeze(dim)
@@ -417,15 +397,11 @@ def norm(input, p=2, dim=None, keepdim=False, dtype=None, out=None):
     if p == 2 and dim is None:
         sq = t * t
         return sq.sum().sqrt()
-    # numpy fallback for other norms
-    return Tensor(np.linalg.norm(_np(t), ord=p, axis=dim, keepdims=keepdim).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of non-p=2 norm is required.")
 
 
 def median(input, dim=None, keepdim=False):     # numpy fallback
-    t = _wrap(input)
-    if dim is None:
-        return Tensor(float(np.median(_np(t))))
-    return Tensor(np.median(_np(t), axis=dim, keepdims=keepdim).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of median is required.")
 
 
 def logsumexp(input, dim, keepdim=False):
@@ -442,11 +418,11 @@ def logsumexp(input, dim, keepdim=False):
 
 
 def cumsum(input, dim, dtype=None, out=None):   # numpy fallback
-    return Tensor(np.cumsum(_np(_wrap(input)), axis=dim).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of cumsum is required.")
 
 
 def cumprod(input, dim, dtype=None, out=None):  # numpy fallback
-    return Tensor(np.cumprod(_np(_wrap(input)), axis=dim).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of cumprod is required.")
 
 
 def all(input, dim=None, keepdim=False, out=None):
@@ -458,7 +434,7 @@ def all(input, dim=None, keepdim=False, out=None):
         # sum == n means all are 1.0
         arr = _np(s)
         return Tensor(float(bool(arr.item() >= n - 1e-4)))
-    return Tensor(np.all(_np(t), axis=dim, keepdims=keepdim).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of dim-wise all is required.")
 
 
 def any(input, dim=None, keepdim=False, out=None):
@@ -466,7 +442,7 @@ def any(input, dim=None, keepdim=False, out=None):
     if dim is None:
         s = Tensor(t._tensor.sum_all())
         return Tensor(float(_np(s).item() > 1e-6))
-    return Tensor(np.any(_np(t), axis=dim, keepdims=keepdim).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of dim-wise any is required.")
 
 
 def numel(input):
@@ -489,9 +465,9 @@ def gt(input, other, out=None):    return _cmp('greater',       input, other)
 def ge(input, other, out=None):    return _cmp('greater_equal', input, other)
 
 
-def isnan(input):    return Tensor(np.isnan(_np(_wrap(input))).astype(np.float32))
-def isinf(input):    return Tensor(np.isinf(_np(_wrap(input))).astype(np.float32))
-def isfinite(input): return Tensor(np.isfinite(_np(_wrap(input))).astype(np.float32))
+def isnan(input):    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of isnan is required.")
+def isinf(input):    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of isinf is required.")
+def isfinite(input): raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of isfinite is required.")
 
 
 def allclose(input, other, rtol=1e-5, atol=1e-8, equal_nan=False):
@@ -499,63 +475,31 @@ def allclose(input, other, rtol=1e-5, atol=1e-8, equal_nan=False):
 
 
 def topk(input, k, dim=-1, largest=True, sorted=True, out=None):  # numpy fallback
-    t   = _wrap(input)
-    arr = _np(t)
-    if dim == -1:
-        dim = arr.ndim - 1
-    idx = np.argsort(arr, axis=dim)
-    if largest:
-        idx = np.flip(idx, axis=dim)
-    idx  = np.take(idx, np.arange(k), axis=dim)
-    vals = np.take_along_axis(arr, idx, axis=dim)
-    return Tensor(vals.astype(np.float32)), Tensor(idx.astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of topk is required.")
 
 
 def sort(input, dim=-1, descending=False, stable=False, out=None):  # numpy fallback
-    t   = _wrap(input)
-    arr = _np(t)
-    if dim == -1:
-        dim = arr.ndim - 1
-    idx  = np.argsort(arr, axis=dim, stable=stable)
-    if descending:
-        idx = np.flip(idx, axis=dim)
-    vals = np.take_along_axis(arr, idx, axis=dim)
-    return Tensor(vals.astype(np.float32)), Tensor(idx.astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of sort is required.")
 
 
 # ─── INDEXING, JOINING, MUTATING ─────────────────────────────────────────────
 
 def cat(tensors, dim=0, out=None):
     raw = [_raw(t) for t in tensors]
-    try:
-        return Tensor(_kernels.PyTensor.cat(raw, dim))
-    except Exception:
-        arrs = [_np(_wrap(t)) for t in tensors]
-        return Tensor(np.concatenate(arrs, axis=dim).astype(np.float32))
+    return Tensor(_kernels.PyTensor.cat(raw, dim))
 
 
 def stack(tensors, dim=0, out=None):
     raw = [_raw(t) for t in tensors]
-    try:
-        return Tensor(_kernels.PyTensor.stack(raw, dim))
-    except Exception:
-        arrs = [_np(_wrap(t)) for t in tensors]
-        return Tensor(np.stack(arrs, axis=dim).astype(np.float32))
+    return Tensor(_kernels.PyTensor.stack(raw, dim))
 
 
 def chunk(input, chunks, dim=0):   # numpy fallback
-    arrs = np.array_split(_np(_wrap(input)), chunks, axis=dim)
-    return [Tensor(a.astype(np.float32)) for a in arrs]
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of chunk is required.")
 
 
 def split(tensor, split_size_or_sections, dim=0):  # numpy fallback
-    t   = _wrap(tensor)
-    arr = _np(t)
-    if isinstance(split_size_or_sections, int):
-        indices = list(range(split_size_or_sections, arr.shape[dim], split_size_or_sections))
-    else:
-        indices = list(np.cumsum(split_size_or_sections)[:-1])
-    return [Tensor(a.astype(np.float32)) for a in np.split(arr, indices, axis=dim)]
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of split is required.")
 
 
 def view(input, *shape):
@@ -587,17 +531,11 @@ def permute(input, dims):
 
 
 def gather(input, dim, index, sparse_grad=False, out=None):  # numpy fallback
-    return Tensor(np.take_along_axis(_np(_wrap(input)), _np(_wrap(index)).astype(np.int64), axis=dim).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of gather is required.")
 
 
 def scatter_(input, dim, index, src):   # numpy fallback
-    t   = _wrap(input)
-    arr = _np(t).copy()
-    idx = _np(_wrap(index)).astype(np.int64)
-    src_arr = _np(_wrap(src)) if isinstance(src, Tensor) else src
-    np.put_along_axis(arr, idx, src_arr, axis=dim)
-    t._tensor = Tensor(arr.astype(np.float32))._tensor
-    return t
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of scatter_ is required.")
 
 
 def index_select(input, dim, index, out=None):
@@ -612,69 +550,55 @@ def index_select(input, dim, index, out=None):
 def where(condition, input=None, other=None):
     cond = _wrap(condition)
     if input is None:
-        return Tensor(np.argwhere(_np(cond).astype(bool)).astype(np.float32))
+        raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of where(condition) is required.")
     a = _wrap(input)
     b = _wrap(other)
-    try:
-        # candle where_cond needs u32
-        c = cond._tensor.to_dtype("uint32")
-        return Tensor(c.where_cond(a._tensor, b._tensor))
-    except Exception:
-        # numpy fallback
-        return Tensor(np.where(_np(cond).astype(bool), _np(a), _np(b)).astype(np.float32))
+    # candle where_cond needs u32
+    c = cond._tensor.to_dtype("uint32")
+    return Tensor(c.where_cond(a._tensor, b._tensor))
 
 
 def masked_select(input, mask, out=None):  # numpy fallback
-    return Tensor(_np(_wrap(input))[_np(_wrap(mask)).astype(bool)].astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of masked_select is required.")
 
 
 def nonzero(input, out=None, as_tuple=False):   # numpy fallback
-    indices = np.nonzero(_np(_wrap(input)))
-    if as_tuple:
-        return tuple(Tensor(i.astype(np.float32)) for i in indices)
-    return Tensor(np.column_stack(indices).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of nonzero is required.")
 
 
 def unique(input, sorted=True, return_inverse=False, return_counts=False, dim=None):  # numpy fallback
-    result = np.unique(_np(_wrap(input)), return_inverse=return_inverse, return_counts=return_counts, axis=dim)
-    if return_inverse or return_counts:
-        return tuple(Tensor(r.astype(np.float32)) for r in result)
-    return Tensor(result.astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of unique is required.")
 
 
 def tril(input, diagonal=0, out=None):   # numpy fallback (candle has no tril)
-    return Tensor(np.tril(_np(_wrap(input)), k=diagonal).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of tril is required.")
 
 
 def triu(input, diagonal=0, out=None):   # numpy fallback
-    return Tensor(np.triu(_np(_wrap(input)), k=diagonal).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of triu is required.")
 
 
 def flip(input, dims, out=None):    # numpy fallback
-    return Tensor(np.flip(_np(_wrap(input)), axis=dims).copy().astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of flip is required.")
 
 
 def roll(input, shifts, dims=None):  # numpy fallback
-    return Tensor(np.roll(_np(_wrap(input)), shifts, axis=dims).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of roll is required.")
 
 
 def repeat_interleave(input, repeats, dim=None, output_size=None):  # numpy fallback
-    return Tensor(np.repeat(_np(_wrap(input)), repeats, axis=dim).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of repeat_interleave is required.")
 
 
 def broadcast_to(input, size):
     t = _wrap(input)
-    try:
-        return Tensor(t._tensor.broadcast_as(tuple(size)))
-    except Exception:
-        return Tensor(np.broadcast_to(_np(t), size).copy().astype(np.float32))
+    return Tensor(t._tensor.broadcast_as(tuple(size)))
 
 
 # ─── EINSUM ──────────────────────────────────────────────────────────────────
 
 def einsum(equation, *operands):   # numpy fallback (complex indexing)
-    ops_np = [_np(_wrap(o)) for o in operands]
-    return Tensor(np.einsum(equation, *ops_np).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of einsum is required.")
 
 
 # ─── ALIASES ─────────────────────────────────────────────────────────────────
@@ -719,4 +643,4 @@ def select(input, dim, index):
     t = _wrap(input)
     if dim == 0:
         return Tensor(t._tensor.get(index))
-    return Tensor(np.take(_np(t), index, axis=dim).astype(np.float32))
+    raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of dim > 0 select is required.")

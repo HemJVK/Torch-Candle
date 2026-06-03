@@ -24,26 +24,7 @@ try:
     )
     JITCompiledFunction = torch_candle_cpp.JITCompiledFunction
 except Exception as e:
-    # Print warning but keep Python fallback
-    print(f"⚠️ [JIT Compiler] C++ dynamic JIT load failed: {e}. Using Python JIT fallback.")
-    class JITCompiledFunction:
-        def __init__(self, expr):
-            self.expr = expr
-        def forward(self, inputs, input_names):
-            env = {name: val for name, val in zip(input_names, inputs)}
-            globals_dict = {
-                "__builtins__": None,
-                "sin": torch.sin,
-                "cos": torch.cos,
-                "exp": torch.exp,
-                "log": torch.log,
-                "sigmoid": torch.sigmoid,
-                "relu": torch.relu,
-                "tanh": torch.tanh,
-            }
-            return eval(self.expr, globals_dict, env)
-        def backward(self, inputs, input_names, grad_output):
-            raise NotImplementedError("C++ JIT Autograd required for backward pass.")
+    raise RuntimeError(f"CRITICAL_JIT_COMPILATION_ERROR: C++ dynamic JIT load failed: {e}") from e
 
 
 
@@ -61,8 +42,10 @@ class ScriptModule:
         if self.recorded_shapes is None:
             self.recorded_shapes = current_shapes
         elif current_shapes != self.recorded_shapes:
-            print(f"⚠️ [JIT Tracing] Dynamic shape detected in ScriptModule (expected {self.recorded_shapes}, got {current_shapes}). Falling back to eager mode.")
-            return self._obj(*args, **kwargs)
+            raise RuntimeError(
+                f"Zero-Fallback Mandate Violation: Dynamic shape detected in ScriptModule "
+                f"(expected {self.recorded_shapes}, got {current_shapes}). Fallback to eager mode is prohibited."
+            )
             
         return self._obj(*args, **kwargs)
         

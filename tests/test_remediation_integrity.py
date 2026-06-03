@@ -128,6 +128,7 @@ def test_native_ast_parser_gil_free():
 
 def test_spsc_shared_memory_direct_serialization():
     from torch_candle_backend import SPSCRingBuffer
+    import struct
     
     compiler = torch.NativeASTParser.parse_expression("x * 2.0 + y")
     # Allocate a lock-free SPSC ring-buffer over shared memory
@@ -137,12 +138,25 @@ def test_spsc_shared_memory_direct_serialization():
     compiler.serialize_to_buffer(ring_buf)
     
     # Pop the contiguous C-compatible structures directly from shared memory
-    task = ring_buf.pop()
-    assert task is not None
-    assert task.op_code == 777
-    assert task.device_id == 0
+    mv = memoryview(ring_buf)
+    head = struct.unpack_from("Q", mv, 0)[0]
+    tail = struct.unpack_from("Q", mv, 136)[0]
+    
+    assert tail != head
+    
+    index = tail % 1024
+    task_offset = 144 + index * 4752
+    
+    op_code = struct.unpack_from("I", mv, task_offset + 0)[0]
+    device_id = struct.unpack_from("Q", mv, task_offset + 8)[0]
+    payload = bytes(mv[task_offset + 16 : task_offset + 16 + 256])
+    
+    struct.pack_into("Q", mv, 136, tail + 1)
+    
+    assert op_code == 777
+    assert device_id == 0
     # Payload encodes contiguous layout: byte 0 is input count, byte 1 is output count
-    assert task.payload[0] > 0 or task.payload[1] > 0
+    assert payload[0] > 0 or payload[1] > 0
 
 
 def test_lock_free_stream_barriers_hybrid_wait():

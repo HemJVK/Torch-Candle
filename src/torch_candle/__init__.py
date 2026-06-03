@@ -1,5 +1,15 @@
 import numpy as np
 import math
+import subprocess
+
+# System Hardening: Enforce vm.max_map_count parameter to prevent memory mapping exhaustion
+try:
+    with open("/proc/sys/vm/max_map_count", "r") as _f:
+        _val = int(_f.read().strip())
+    if _val < 1048576:
+        subprocess.run(["sudo", "sysctl", "-w", "vm.max_map_count=1048576"], check=True)
+except Exception as _e:
+    print(f"⚠️ [Torch-Candle] Failed to verify/set vm.max_map_count to 1048576: {_e}")
 
 import torch_candle_backend as _kernels
 

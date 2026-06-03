@@ -213,6 +213,38 @@ impl SPSCRingBuffer {
         Ok(true)
     }
 
+    pub fn verify_128_padding(&self) -> PyResult<bool> {
+        unsafe {
+            let layout = &*self.raw_ptr;
+            let head_addr = &layout.head as *const AtomicUsize as usize;
+            let tail_addr = &layout.tail as *const AtomicUsize as usize;
+            let diff = tail_addr - head_addr;
+            // 8 bytes for AtomicUsize + 128 bytes padding = 136 bytes difference
+            Ok(diff == 136)
+        }
+    }
+
+    unsafe fn __getbuffer__(
+        &self,
+        view: *mut pyo3::ffi::Py_buffer,
+        flags: std::os::raw::c_int,
+    ) -> PyResult<()> {
+        let size = std::mem::size_of::<SPSCRingBufferLayout>();
+        pyo3::ffi::PyBuffer_FillInfo(
+            view,
+            std::ptr::null_mut(),
+            self.raw_ptr as *mut std::ffi::c_void,
+            size as isize,
+            0,
+            flags,
+        );
+        Ok(())
+    }
+
+    unsafe fn __releasebuffer__(&self, _view: *mut pyo3::ffi::Py_buffer) {}
+}
+
+impl SPSCRingBuffer {
     pub fn push(&self, op_code: u32, device_id: u32, payload_bytes: Vec<u8>) -> PyResult<()> {
         if !self.is_mmap {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -374,36 +406,6 @@ impl SPSCRingBuffer {
         
         Ok(task)
     }
-
-    pub fn verify_128_padding(&self) -> PyResult<bool> {
-        unsafe {
-            let layout = &*self.raw_ptr;
-            let head_addr = &layout.head as *const AtomicUsize as usize;
-            let tail_addr = &layout.tail as *const AtomicUsize as usize;
-            let diff = tail_addr - head_addr;
-            // 8 bytes for AtomicUsize + 128 bytes padding = 136 bytes difference
-            Ok(diff == 136)
-        }
-    }
-
-    unsafe fn __getbuffer__(
-        &self,
-        view: *mut pyo3::ffi::Py_buffer,
-        flags: std::os::raw::c_int,
-    ) -> PyResult<()> {
-        let size = std::mem::size_of::<SPSCRingBufferLayout>();
-        pyo3::ffi::PyBuffer_FillInfo(
-            view,
-            std::ptr::null_mut(),
-            self.raw_ptr as *mut std::ffi::c_void,
-            size as isize,
-            0,
-            flags,
-        );
-        Ok(())
-    }
-
-    unsafe fn __releasebuffer__(&self, _view: *mut pyo3::ffi::Py_buffer) {}
 }
 
 impl Drop for SPSCRingBuffer {

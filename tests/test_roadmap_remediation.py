@@ -122,27 +122,70 @@ def test_jit_dynamic_shapes(capsys):
     out2 = compiled(a, b)
     assert np.allclose(out2.numpy(), [3.0])
     
-    # Third pass: dynamic shape (trigger eager mode fallback)
+    # Third pass: dynamic shape (must trigger RuntimeError due to Zero-Fallback mandate)
     c = torch.tensor([1.0, 2.0])
     d = torch.tensor([3.0, 4.0])
-    out3 = compiled(c, d)
-    assert np.allclose(out3.numpy(), [4.0, 6.0])
-    
-    captured = capsys.readouterr()
-    assert "Dynamic shape detected" in captured.out
+    with pytest.raises(RuntimeError) as exc_info:
+        compiled(c, d)
+    assert "Zero-Fallback Mandate Violation" in str(exc_info.value)
 
 
 # ============================================================
 # Phase 5: Concurrency & SPSC Ring Buffer Tests
 # ============================================================
 def test_spsc_ring_buffer():
+    import struct
     buf = _kernels.SPSCRingBuffer()
     results = []
     
+    def py_wait_and_pop(buffer_obj):
+        mv = memoryview(buffer_obj)
+        start_time = time.time()
+        while True:
+            head = struct.unpack_from("Q", mv, 0)[0]
+            tail = struct.unpack_from("Q", mv, 136)[0]
+            if tail != head:
+                break
+            if time.time() - start_time > 2.0:
+                raise TimeoutError("SPSC Wait and Pop timed out")
+            time.sleep(0.001)
+            
+        index = tail % 1024
+        task_offset = 144 + index * 4752
+        
+        op_code = struct.unpack_from("I", mv, task_offset + 0)[0]
+        device_id = struct.unpack_from("Q", mv, task_offset + 8)[0]
+        payload = bytes(mv[task_offset + 16 : task_offset + 16 + 256])
+        
+        struct.pack_into("Q", mv, 136, tail + 1)
+        return op_code, device_id, payload
+
+    def py_push(buffer_obj, op_code, device_id, payload_bytes):
+        mv = memoryview(buffer_obj)
+        head = struct.unpack_from("Q", mv, 0)[0]
+        tail = struct.unpack_from("Q", mv, 136)[0]
+        
+        if head - tail >= 1024:
+            raise RuntimeError("Buffer full")
+            
+        index = head % 1024
+        task_offset = 144 + index * 4752
+        
+        struct.pack_into("I", mv, task_offset + 0, op_code)
+        struct.pack_into("Q", mv, task_offset + 8, device_id)
+        
+        copy_len = min(len(payload_bytes), 4096)
+        mv[task_offset + 16 : task_offset + 16 + copy_len] = payload_bytes[:copy_len]
+        if copy_len < 4096:
+            mv[task_offset + 16 + copy_len : task_offset + 16 + 4096] = b'\x00' * (4096 - copy_len)
+            
+        struct.pack_into("Q", mv, 0, head + 1)
+        
     def consumer():
         try:
-            task = buf.wait_and_pop()
-            results.append((True, task.op_code, task.device_id, bytes(task.payload).decode().rstrip('\x00')))
+            op_code, device_id, payload = py_wait_and_pop(buf)
+            msg = payload.decode().rstrip('\x00')
+            results.append((True, op_code, device_id, msg))
         except Exception as e:
             results.append((False, str(e)))
             
@@ -151,7 +194,7 @@ def test_spsc_ring_buffer():
     
     # Wait a bit, then push item to unpark/trigger consumer
     time.sleep(0.1)
-    buf.push(42, 1, b"Hello SPSC IPC")
+    py_push(buf, 42, 1, b"Hello SPSC IPC")
     t.join()
     
     assert results

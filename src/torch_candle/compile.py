@@ -20,8 +20,11 @@ class CompiledModel:
             # Subsequent passes: check if shape matches!
             current_shapes = [tuple(a.shape) if hasattr(a, "shape") else None for a in args]
             if current_shapes != self.recorded_graph.get("input_shapes"):
-                print(f"⚠️ [JIT Tracing] Dynamic shape detected in CompiledModel (expected {self.recorded_graph.get('input_shapes')}, got {current_shapes}). Falling back to eager mode.")
-                return self.model(*args, **kwargs)
+                raise RuntimeError(
+                    f"Zero-Fallback Mandate Violation: Dynamic shape detected in CompiledModel "
+                    f"(expected {self.recorded_graph.get('input_shapes')}, got {current_shapes}). "
+                    f"Fallback to eager mode is prohibited."
+                )
                 
             return self.model(*args, **kwargs)
 
