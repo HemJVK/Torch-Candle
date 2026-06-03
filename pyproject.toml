@@ -25,7 +25,8 @@ build-backend = "maturin"
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "torch_candle_backend"
-working-directory = "rust"
+manifest-path = "rust/Cargo.toml"
+python-packages = ["torch_candle"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

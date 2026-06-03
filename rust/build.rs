@@ -4,7 +4,11 @@ fn main() {
     println!("cargo:rerun-if-changed=src/kernels_rocm.hip");
     
     // Check if hipcc is available in the environment
-    let has_hipcc = Command::new("hipcc").arg("--version").status().is_ok();
+    let version_output = Command::new("hipcc").arg("--version").output();
+    let has_hipcc = version_output.is_ok();
+    let is_nvcc = version_output
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("nvcc"))
+        .unwrap_or(false);
     let use_rocm = std::env::var("USE_ROCM").map(|v| v == "1" || v == "true" || v == "True").unwrap_or(false);
     
     if use_rocm && !has_hipcc {
@@ -15,28 +19,51 @@ fn main() {
         println!("cargo:warning=🚀 [hipcc Build] Found hipcc! Compiling AMD ROCm HIP kernels Ahead-of-Time (AOT)...");
         let out_dir = std::env::var("OUT_DIR").unwrap();
         
-        let status = Command::new("hipcc")
-            .args(&[
-                "-c",
-                "src/kernels_rocm.hip",
-                "-fPIC",
-                "--offload-arch=gfx906",
-                "--offload-arch=gfx908",
-                "--offload-arch=gfx90a",
-                "--offload-arch=gfx90c",
-                "--offload-arch=gfx1030",
-                "--offload-arch=gfx1100",
-                "-o",
-                &format!("{}/kernels_rocm.o", out_dir),
-            ])
-            .status();
+        let mut compile_args = vec![
+            "-c".to_string(),
+            "src/kernels_rocm.hip".to_string(),
+            "-fPIC".to_string(),
+        ];
+        if is_nvcc {
+            compile_args.push("-x".to_string());
+            compile_args.push("cu".to_string());
+        } else {
+            compile_args.extend(
+                vec![
+                    "--offload-arch=gfx906",
+                    "--offload-arch=gfx908",
+                    "--offload-arch=gfx90a",
+                    "--offload-arch=gfx90c",
+                    "--offload-arch=gfx1030",
+                    "--offload-arch=gfx1100",
+                ]
+                .into_iter()
+                .map(|s| s.to_string()),
+            );
+        }
+        compile_args.push("-o".to_string());
+        compile_args.push(format!("{}/kernels_rocm.o", out_dir));
+
+        let output = Command::new("hipcc")
+            .args(&compile_args)
+            .output();
             
-        let compile_success = match status {
-            Ok(s) => s.success(),
+        let compile_success = match &output {
+            Ok(o) => o.status.success(),
             _ => false,
         };
         
         if !compile_success {
+            if let Ok(o) = output {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                for line in stdout.lines() {
+                    println!("cargo:warning=[hipcc stdout] {}", line);
+                }
+                for line in stderr.lines() {
+                    println!("cargo:warning=[hipcc stderr] {}", line);
+                }
+            }
             if use_rocm {
                 panic!("❌ [hipcc Build] hipcc compilation failed, which is fatal when USE_ROCM=1!");
             }
