@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "A PyTorch-compatible API with Candle backend"
 readme = "README.md"
 authors = [
-    { name = "Hem", email = "hem@example.com" }
+    { name = "Hem", email = "[EMAIL_ADDRESS]" }
 ]
 dependencies = [
     "numpy",
