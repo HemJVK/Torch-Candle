@@ -49,7 +49,7 @@ def test_sha_numerical_stability():
     w_std.grad = torch.Tensor([float('nan')])
     assert np.isnan(w_std.grad.item()), "NaN was not retained"
 
-    # Test SHA self-healing (SHA is enabled) - EMA is purged, so NaN is retained
+    # Test SHA self-healing (SHA is enabled) - EMA is re-enabled, so NaN is healed
     torch.Tensor.enable_sha = True
     torch.set_disable_ema_estimates(False)
     torch.clear_grad_history()
@@ -61,7 +61,8 @@ def test_sha_numerical_stability():
     
     # Inject anomaly gradient (NaN)
     w_sha.grad = torch.Tensor([float('nan')])
-    assert np.isnan(w_sha.grad.item()), "NaN was healed but EMA is purged"
+    assert not np.isnan(w_sha.grad.item()), "NaN was not healed under SHA-EMA"
+    assert w_sha.grad.item() == pytest.approx(3.0)
 
 # 3. Auto-Device Alignment Discovery & Stress Test
 def test_auto_device_alignment_stress():

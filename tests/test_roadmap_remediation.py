@@ -61,9 +61,10 @@ def test_caching_allocator_sync():
     new_ptr = _allocator.allocate(1024, 2, "new_tag")
     assert new_ptr == ptr # block is reused!
     
-    # 5. Test Tensor level record_stream
+    # 5. Test Tensor level record_stream (should raise RuntimeError due to the ban)
     t = torch.tensor([1.0, 2.0, 3.0])
-    t.record_stream(s1)
+    with pytest.raises(RuntimeError, match="record_stream is banned"):
+        t.record_stream(s1)
     
     # 6. Test cuda_free release
     _allocator.cuda_free(ptr)

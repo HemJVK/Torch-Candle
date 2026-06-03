@@ -239,8 +239,9 @@ def test_autograd_ema_trajectory_healing():
     
     w_anom = torch.Tensor([5.0], requires_grad=True)
     w_anom.grad = torch.Tensor([1.5])
-    assert w_anom.grad.item() == 1.5
+    assert w_anom.grad.item() == pytest.approx(1.5)
     
     w_anom.grad = torch.Tensor([float('nan')])
-    assert np.isnan(w_anom.grad.item()), "NaN was healed but EMA is purged"
+    assert not np.isnan(w_anom.grad.item()), "NaN was not healed under SHA-EMA"
+    assert w_anom.grad.item() == pytest.approx(1.5)
 

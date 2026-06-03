@@ -130,21 +130,30 @@ class Tensor:
 
     @property
     def grad(self):
-        g = self._tensor.retrieve_grad(self._id)
+        gid = self._tensor.grad_id()
+        if gid is None:
+            return None
+        g = self._tensor.retrieve_grad(gid)
         if g is None:
             return None
         return self._fast_wrap(g, dtype=self.dtype)
 
     @grad.setter
     def grad(self, value):
+        gid = self._tensor.grad_id()
+        if gid is None:
+            if value is not None:
+                self._tensor.set_grad_with_id(value._tensor if isinstance(value, Tensor) else Tensor(value, device=self.device)._tensor, 0)
+            return
+            
         if value is None:
-            self._tensor.grad = None
+            self._tensor.set_grad_with_id(None, gid)
             return
             
         if not isinstance(value, Tensor):
             value = Tensor(value, device=self.device)
             
-        self._tensor.grad = value._tensor
+        self._tensor.set_grad_with_id(value._tensor, gid)
 
     @property
     def grad_fn(self):
@@ -486,17 +495,7 @@ class Tensor:
                             inp.backward(g)
 
     def record_stream(self, stream):
-        """
-        Record that the tensor is being used by the given stream.
-        Re-enrolls active caching allocator metadata tracking alongside GPU-native Events.
-        """
-        from torch_candle.cuda import Event, Stream, _allocator
-        comp_stream = Stream(0)
-        comm_stream = stream if isinstance(stream, Stream) else Stream(stream)
-        
-        event = Event()
-        event.record(comp_stream)
-        event.wait(comm_stream)
+        raise RuntimeError("Usage of record_stream is banned. Use explicit stream-to-stream event queuing via stream_wait_event.")
 
     def __del__(self):
         try:

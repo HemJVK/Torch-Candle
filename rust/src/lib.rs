@@ -384,6 +384,48 @@ fn save_python_grad_history(py: Python<'_>, param_id: usize, shape: Vec<usize>, 
     }
 }
 
+fn heal_gradient(py: Python<'_>, tensor_id: usize, new_grad: &Tensor) -> PyResult<Tensor> {
+    if !get_python_enable_sha(py) || get_disable_ema_estimates(py) {
+        return Ok(new_grad.clone());
+    }
+
+    if !has_nan_or_inf(new_grad) {
+        if let Ok(vec) = new_grad.flatten_all().and_then(|x| x.to_vec1::<f32>()) {
+            let shape = new_grad.dims().to_vec();
+            if let Some((_, old_hist)) = get_python_grad_history(py, tensor_id) {
+                let mut new_hist = old_hist;
+                for i in 0..new_hist.len().min(vec.len()) {
+                    new_hist[i] = 0.9 * new_hist[i] + 0.1 * vec[i];
+                }
+                save_python_grad_history(py, tensor_id, shape, new_hist);
+            } else {
+                save_python_grad_history(py, tensor_id, shape, vec);
+            }
+        }
+        return Ok(new_grad.clone());
+    }
+
+    if let Some((shape, history)) = get_python_grad_history(py, tensor_id) {
+        if let Ok(mut vec) = new_grad.flatten_all().and_then(|x| x.to_vec1::<f32>()) {
+            let mut healed = false;
+            for i in 0..vec.len().min(history.len()) {
+                if vec[i].is_nan() || vec[i].is_infinite() {
+                    vec[i] = history[i];
+                    healed = true;
+                }
+            }
+            if healed {
+                let dev = new_grad.device();
+                let healed_t = Tensor::from_vec(vec, shape.as_slice(), dev)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+                return Ok(healed_t);
+            }
+        }
+    }
+
+    Ok(new_grad.clone())
+}
+
 // --- Autograd Infrastructure ---
 
 pub trait OpNode: Send + Sync {
@@ -1359,12 +1401,15 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (py_param_id=None))]
-    fn retrieve_grad(&self, _py: Python<'_>, py_param_id: Option<usize>) -> PyResult<Option<PyTensor>> {
+    fn retrieve_grad(&self, py: Python<'_>, py_param_id: Option<usize>) -> PyResult<Option<PyTensor>> {
         if let Some(ref g_mutex) = self.grad {
-            let g_opt = g_mutex.lock();
+            let param_id = py_param_id.unwrap_or_else(|| Arc::as_ptr(g_mutex) as usize);
+            let mut g_opt = g_mutex.lock();
             if let Some(ref g) = *g_opt {
+                let healed = heal_gradient(py, param_id, g)?;
+                *g_opt = Some(healed.clone());
                 return Ok(Some(PyTensor {
-                    inner: g.clone(),
+                    inner: healed,
                     grad: None,
                     grad_fn: None,
                     requires_grad: false,
@@ -1376,10 +1421,16 @@ impl PyTensor {
     }
 
     #[setter]
-    fn set_grad(&self, new_grad: Option<PyTensor>) -> PyResult<()> {
+    fn set_grad(&self, py: Python<'_>, new_grad: Option<PyTensor>) -> PyResult<()> {
         if let Some(ref g_mutex) = self.grad {
+            let param_id = Arc::as_ptr(g_mutex) as usize;
             let mut g_opt = g_mutex.lock();
-            *g_opt = new_grad.map(|t| t.inner.clone());
+            if let Some(ref t) = new_grad {
+                let healed = heal_gradient(py, param_id, &t.inner)?;
+                *g_opt = Some(healed);
+            } else {
+                *g_opt = None;
+            }
             Ok(())
         } else {
             if new_grad.is_some() {
@@ -1388,6 +1439,30 @@ impl PyTensor {
                 Ok(())
             }
         }
+    }
+
+    #[pyo3(signature = (new_grad, param_id))]
+    fn set_grad_with_id(&self, py: Python<'_>, new_grad: Option<PyTensor>, param_id: usize) -> PyResult<()> {
+        if let Some(ref g_mutex) = self.grad {
+            let mut g_opt = g_mutex.lock();
+            if let Some(ref t) = new_grad {
+                let healed = heal_gradient(py, param_id, &t.inner)?;
+                *g_opt = Some(healed);
+            } else {
+                *g_opt = None;
+            }
+            Ok(())
+        } else {
+            if new_grad.is_some() {
+                Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("cannot set grad on tensor that does not require grad"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn grad_id(&self) -> Option<usize> {
+        self.grad.as_ref().map(|g| Arc::as_ptr(g) as usize)
     }
 
     // --- Arithmetic ---
@@ -1662,7 +1737,7 @@ impl PyTensor {
     // Skipping others for brevity in this step, but standard logic applies.
 
     #[pyo3(signature = (gradient=None))]
-    fn backward(&self, _py: Python<'_>, gradient: Option<PyTensor>) -> PyResult<()> {
+    fn backward(&self, py: Python<'_>, gradient: Option<PyTensor>) -> PyResult<()> {
         if !self.requires_grad {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("backward called on tensor that does not require grad"));
         }
@@ -1674,12 +1749,14 @@ impl PyTensor {
 
         // Accumulate grad on self
         if let Some(ref g_mutex) = self.grad {
+            let param_id = Arc::as_ptr(g_mutex) as usize;
             let mut g_opt = g_mutex.lock();
-            if let Some(ref current_g) = *g_opt {
-                *g_opt = Some(current_g.add(&grad_val).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?);
+            let accumulated = if let Some(ref current_g) = *g_opt {
+                current_g.add(&grad_val).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
             } else {
-                *g_opt = Some(grad_val.clone());
-            }
+                grad_val.clone()
+            };
+            *g_opt = Some(heal_gradient(py, param_id, &accumulated)?);
         }
 
         // --- Topological Engine ---
@@ -1720,11 +1797,13 @@ impl PyTensor {
                     if let Some(p_grad) = maybe_grad {
                         if let Some(ref pg_mutex) = parent.grad {
                             let mut pg_opt = pg_mutex.lock();
-                            if let Some(ref current_pg) = *pg_opt {
-                                *pg_opt = Some(current_pg.add(&p_grad).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?);
+                            let param_id = Arc::as_ptr(pg_mutex) as usize;
+                            let accumulated = if let Some(ref current_pg) = *pg_opt {
+                                current_pg.add(&p_grad).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
                             } else {
-                                *pg_opt = Some(p_grad);
-                            }
+                                p_grad
+                            };
+                            *pg_opt = Some(heal_gradient(py, param_id, &accumulated)?);
                         }
                     }
                 }

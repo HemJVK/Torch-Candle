@@ -195,35 +195,34 @@ def rearrange(tensor, pattern, **axes_lengths):
     return res.reshape(*final_shape)
 
 def vmap(func, in_dims=0, out_dims=0):
-    """Vectorizing map over a dimension. Simulates torch.func.vmap."""
-    from torch_candle import stack
+    """Vectorizing map over a dimension using dynamic subclassing dispatcher."""
     def wrapped(*args, **kwargs):
-        # Push dynamic level dispatch key
-        level_id = f"vmap_level_{get_active_dispatch_level() + 1}"
-        push_dispatch_level(level_id)
-        
+        # We determine the nesting level
+        level = get_active_dispatch_level() + 1
+        push_dispatch_level(f"vmap_level_{level}")
         try:
-            # Determine number of batch elements
-            n_slices = args[0].shape[in_dims]
-            slices = [[] for _ in range(n_slices)]
-            
+            # Construct subclassed inputs
+            batched_args = []
             for arg in args:
-                if hasattr(arg, "shape") and len(arg.shape) > in_dims:
-                    for idx in range(n_slices):
-                        slices[idx].append(arg[idx])
+                if isinstance(arg, Tensor):
+                    if level == 1:
+                        batched_args.append(BatchTensor0(arg, in_dims))
+                    else:
+                        batched_args.append(BatchTensor1(arg, in_dims))
                 else:
-                    for idx in range(n_slices):
-                        slices[idx].append(arg)
-                        
-            outputs = []
-            for idx in range(n_slices):
-                out = func(*slices[idx], **kwargs)
-                outputs.append(out)
-                
-            return stack(outputs, dim=out_dims)
+                    batched_args.append(arg)
+            
+            # Execute the function using the batched inputs
+            out = func(*batched_args, **kwargs)
+            
+            # Return the underlying stacked/vectorized tensor
+            if isinstance(out, (BatchTensor0, BatchTensor1)):
+                return Tensor(out._tensor)
+            return out
         finally:
             pop_dispatch_level()
     return wrapped
+
 
 def grad(func, argnums=0):
     """Returns a function that computes the gradient of `func` with respect to `argnums` argument."""
@@ -543,4 +542,143 @@ class DynamicSubclassDispatcher:
     @staticmethod
     def hessian(func, argnums=0):
         return hessian(func, argnums)
+
+
+def to_real_torch(tensor):
+    import sys
+    import importlib
+    real_torch = sys.modules.get('real_torch')
+    if real_torch is None:
+        orig_torch = sys.modules.get('torch')
+        if orig_torch is not None and getattr(orig_torch, '__name__', '') == 'torch_candle':
+            del sys.modules['torch']
+            try:
+                real_torch = importlib.import_module('torch')
+                sys.modules['real_torch'] = real_torch
+            finally:
+                sys.modules['torch'] = orig_torch
+        else:
+            real_torch = importlib.import_module('torch')
+            sys.modules['real_torch'] = real_torch
+    return real_torch.from_numpy(tensor.numpy())
+
+def from_real_torch(pt):
+    return Tensor(pt.detach().cpu().numpy())
+
+
+class BatchTensor0(Tensor):
+    __slots__ = ['batch_dim', 'inner_tensor']
+    
+    def __init__(self, value, batch_dim=0):
+        if isinstance(value, Tensor):
+            super().__init__(value._tensor)
+        else:
+            super().__init__(value)
+        self.batch_dim = batch_dim
+        self.inner_tensor = value
+
+    def __add__(self, other):
+        from torch_candle.jit.compiler import torch_candle_cpp
+        self_cpp = torch_candle_cpp.BatchTensor0_cpp(to_real_torch(self), self.batch_dim)
+        if isinstance(other, BatchTensor0):
+            other_cpp = torch_candle_cpp.BatchTensor0_cpp(to_real_torch(other), other.batch_dim)
+            res = self_cpp.add(other_cpp)
+        else:
+            res = self_cpp.add_const(float(other))
+        return BatchTensor0(from_real_torch(res.value), res.batch_dim)
+
+    def __radd__(self, other):
+        return self.__add__(other)
+
+    def __sub__(self, other):
+        from torch_candle.jit.compiler import torch_candle_cpp
+        self_cpp = torch_candle_cpp.BatchTensor0_cpp(to_real_torch(self), self.batch_dim)
+        if isinstance(other, BatchTensor0):
+            other_cpp = torch_candle_cpp.BatchTensor0_cpp(to_real_torch(other), other.batch_dim)
+            res = self_cpp.sub(other_cpp)
+        else:
+            res = self_cpp.sub_const(float(other))
+        return BatchTensor0(from_real_torch(res.value), res.batch_dim)
+
+    def __mul__(self, other):
+        from torch_candle.jit.compiler import torch_candle_cpp
+        self_cpp = torch_candle_cpp.BatchTensor0_cpp(to_real_torch(self), self.batch_dim)
+        if isinstance(other, BatchTensor0):
+            other_cpp = torch_candle_cpp.BatchTensor0_cpp(to_real_torch(other), other.batch_dim)
+            res = self_cpp.mul(other_cpp)
+        else:
+            res = self_cpp.mul_const(float(other))
+        return BatchTensor0(from_real_torch(res.value), res.batch_dim)
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def __truediv__(self, other):
+        from torch_candle.jit.compiler import torch_candle_cpp
+        self_cpp = torch_candle_cpp.BatchTensor0_cpp(to_real_torch(self), self.batch_dim)
+        if isinstance(other, BatchTensor0):
+            other_cpp = torch_candle_cpp.BatchTensor0_cpp(to_real_torch(other), other.batch_dim)
+            res = self_cpp.div(other_cpp)
+        else:
+            res = self_cpp.div_const(float(other))
+        return BatchTensor0(from_real_torch(res.value), res.batch_dim)
+
+
+class BatchTensor1(Tensor):
+    __slots__ = ['batch_dim', 'inner_tensor']
+    
+    def __init__(self, value, batch_dim=0):
+        if isinstance(value, Tensor):
+            super().__init__(value._tensor)
+        else:
+            super().__init__(value)
+        self.batch_dim = batch_dim
+        self.inner_tensor = value
+
+    def __add__(self, other):
+        from torch_candle.jit.compiler import torch_candle_cpp
+        self_cpp = torch_candle_cpp.BatchTensor1_cpp(to_real_torch(self), self.batch_dim)
+        if isinstance(other, BatchTensor1):
+            other_cpp = torch_candle_cpp.BatchTensor1_cpp(to_real_torch(other), other.batch_dim)
+            res = self_cpp.add(other_cpp)
+        else:
+            res = self_cpp.add_const(float(other))
+        return BatchTensor1(from_real_torch(res.value), res.batch_dim)
+
+    def __radd__(self, other):
+        return self.__add__(other)
+
+    def __sub__(self, other):
+        from torch_candle.jit.compiler import torch_candle_cpp
+        self_cpp = torch_candle_cpp.BatchTensor1_cpp(to_real_torch(self), self.batch_dim)
+        if isinstance(other, BatchTensor1):
+            other_cpp = torch_candle_cpp.BatchTensor1_cpp(to_real_torch(other), other.batch_dim)
+            res = self_cpp.sub(other_cpp)
+        else:
+            res = self_cpp.sub_const(float(other))
+        return BatchTensor1(from_real_torch(res.value), res.batch_dim)
+
+    def __mul__(self, other):
+        from torch_candle.jit.compiler import torch_candle_cpp
+        self_cpp = torch_candle_cpp.BatchTensor1_cpp(to_real_torch(self), self.batch_dim)
+        if isinstance(other, BatchTensor1):
+            other_cpp = torch_candle_cpp.BatchTensor1_cpp(to_real_torch(other), other.batch_dim)
+            res = self_cpp.mul(other_cpp)
+        else:
+            res = self_cpp.mul_const(float(other))
+        return BatchTensor1(from_real_torch(res.value), res.batch_dim)
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def __truediv__(self, other):
+        from torch_candle.jit.compiler import torch_candle_cpp
+        self_cpp = torch_candle_cpp.BatchTensor1_cpp(to_real_torch(self), self.batch_dim)
+        if isinstance(other, BatchTensor1):
+            other_cpp = torch_candle_cpp.BatchTensor1_cpp(to_real_torch(other), other.batch_dim)
+            res = self_cpp.div(other_cpp)
+        else:
+            res = self_cpp.div_const(float(other))
+        return BatchTensor1(from_real_torch(res.value), res.batch_dim)
+
 

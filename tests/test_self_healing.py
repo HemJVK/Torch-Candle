@@ -27,7 +27,7 @@ def test_gradient_propagation_with_ema_disabled():
 
 
 def test_gradient_healing_with_history():
-    # Verify that when SHA is enabled and history exists, NaN is NOT healed (EMA logic purged)
+    # Verify that when SHA is enabled and history exists, NaN IS healed (EMA logic re-enabled)
     torch.Tensor.enable_sha = True
     torch.set_disable_ema_estimates(False)
     torch.clear_grad_history()
@@ -41,9 +41,10 @@ def test_gradient_healing_with_history():
     # 2. Inject NaN
     w.grad = torch.Tensor([float('nan')])
     
-    # 3. Retrieve grad - should NOT heal (retains NaN)
+    # 3. Retrieve grad - should heal (reconstructs value using history)
     healed_grad = w.grad
-    assert np.isnan(healed_grad.item())
+    assert not np.isnan(healed_grad.item())
+    assert healed_grad.item() == pytest.approx(2.0)
 
 
 def test_propagation_through_backward():
