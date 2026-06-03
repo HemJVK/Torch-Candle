@@ -23,6 +23,7 @@ fn main() {
                 "--offload-arch=gfx906",
                 "--offload-arch=gfx908",
                 "--offload-arch=gfx90a",
+                "--offload-arch=gfx90c",
                 "--offload-arch=gfx1030",
                 "--offload-arch=gfx1100",
                 "-o",
