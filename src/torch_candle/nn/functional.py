@@ -58,12 +58,23 @@ def tanh(input):
 def softmax(input, dim=None, dtype=None):
     if dim is None:
         dim = -1
+    if input.device == 'cpu':
+        import numpy as np
+        arr = np.ascontiguousarray(input.numpy())
+        _kernels.fast_softmax(arr, int(dim) if dim >= 0 else int(input.ndim + dim))
+        return Tensor(arr, device='cpu')
     return input._fast_wrap(input._tensor.softmax(dim))
 
 
 def log_softmax(input, dim=None, dtype=None):
     if dim is None:
         dim = -1
+    if input.device == 'cpu':
+        s = softmax(input, dim=dim)
+        import numpy as np
+        arr = np.ascontiguousarray(s.numpy())
+        _kernels.fast_log_kernel(arr)
+        return Tensor(arr, device='cpu')
     return input._fast_wrap(input._tensor.log_softmax(dim))
 
 
@@ -71,19 +82,27 @@ def gelu(input, approximate='none'):
     if input.requires_grad:
         from ..autograd import GELU
         return GELU.apply(input, approximate)
-    
+    if input.device == 'cpu':
+        import numpy as np
+        arr = np.ascontiguousarray(input.numpy())
+        _kernels.fast_gelu(arr)
+        return Tensor(arr, device='cpu')
     if approximate == 'tanh':
-        c = 0.7978845608 # sqrt(2/pi)
+        c = 0.7978845608
         x3 = input * input * input
         inner = (input + x3 * 0.044715) * c
         return input * (inner.tanh() + 1.0) * 0.5
     else:
-        # Native ops.erf
         erf_x = (input / 1.4142135623).erf()
         return input * 0.5 * (1.0 + erf_x)
 
 
 def silu(input, inplace=False):
+    if input.device == 'cpu':
+        import numpy as np
+        arr = np.ascontiguousarray(input.numpy())
+        _kernels.fast_silu(arr)
+        return Tensor(arr, device='cpu')
     return input * input.sigmoid()
 
 
@@ -306,12 +325,17 @@ def batch_norm(input, running_mean, running_var, weight=None, bias=None,
 
 
 def layer_norm(input, normalized_shape, weight=None, bias=None, eps=1e-5):
-    # Standard path via candle arithmetic
+    if input.device == 'cpu':
+        import numpy as np
+        arr = np.ascontiguousarray(input.numpy())
+        w_arr = np.ascontiguousarray(weight.numpy()) if weight is not None else None
+        b_arr = np.ascontiguousarray(bias.numpy()) if bias is not None else None
+        _kernels.fast_layer_norm(arr, w_arr, b_arr, float(eps))
+        return Tensor(arr, device='cpu')
     ndim = input.ndim
     if isinstance(normalized_shape, int):
         normalized_shape = [normalized_shape]
     axis = list(range(ndim - len(normalized_shape), ndim))
-    
     mu = input.mean(dim=axis, keepdim=True)
     diff = input - mu
     var = (diff * diff).mean(dim=axis, keepdim=True)
@@ -412,6 +436,14 @@ def nll_loss(input, target, weight=None, size_average=None, ignore_index=-100, r
 
 def cross_entropy(input, target, weight=None, size_average=None, ignore_index=-100,
                   reduce=None, reduction='mean', label_smoothing=0.0):
+    if input.device == 'cpu' and reduction == 'mean' and label_smoothing == 0.0 and weight is None:
+        try:
+            tgt_raw = _raw(target) if hasattr(target, '_tensor') else _kernels.PyTensor(
+                __import__('numpy').array(target.numpy() if hasattr(target, 'numpy') else target,
+                                          dtype='float32').reshape(-1), device='cpu', dtype='float32', requires_grad=False)
+            return Tensor(_kernels.native_cross_entropy(_raw(input), tgt_raw))
+        except Exception:
+            pass
     ls = log_softmax(input, dim=1)
     return nll_loss(ls, target, reduction=reduction)
 

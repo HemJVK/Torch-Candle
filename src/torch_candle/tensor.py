@@ -201,6 +201,9 @@ class Tensor:
     # Arithmetic — delegated to Rust Autograd
     # ──────────────────────────────────────────────────────────────
     def __add__(self, other):
+        if isinstance(other, (int, float, np.float32, np.float64)):
+            # Use candle affine(1, scalar) — zero extra allocation
+            return self._fast_wrap(self._tensor.affine(1.0, float(other)), dtype=self._dtype)
         if not isinstance(other, Tensor):
             other = Tensor(other, device=self.device)
         if self.device != other.device:
@@ -221,6 +224,9 @@ class Tensor:
         return Tensor(other, device=self.device) - self
 
     def __mul__(self, other):
+        if isinstance(other, (int, float, np.float32, np.float64)):
+            # Use candle affine(scalar, 0) — zero extra allocation
+            return self._fast_wrap(self._tensor.affine(float(other), 0.0), dtype=self._dtype)
         if not isinstance(other, Tensor):
             other = Tensor(other, device=self.device)
         if self.device != other.device:
@@ -567,7 +573,10 @@ class Tensor:
         return ops.clamp(self, min, max)
 
     def std(self, dim=None, keepdim=False, unbiased=True):
-        # Use numpy for std for now
+        if dim is None and self._device == 'cpu':
+            arr = np.ascontiguousarray(self.numpy())
+            val = _kernels.fast_std_kernel(arr, 1 if unbiased else 0)
+            return Tensor(np.array([[val]], dtype=np.float32), device='cpu')
         res = np.std(self.numpy(), axis=dim, keepdims=keepdim, ddof=1 if unbiased else 0)
         return Tensor(res, device=self.device, dtype=self.dtype)
 
