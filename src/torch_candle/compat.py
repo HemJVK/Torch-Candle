@@ -83,8 +83,3 @@ def enable_torch_compat():
         
     if hasattr(torch_candle, 'backends'):
         sys.modules['torch.backends'] = torch_candle.backends
-
-    print("=" * 80)
-    print("🚀 torch-candle: PyTorch drop-in compatibility enabled successfully!")
-    print("   All standard PyTorch imports will now resolve natively to Torch-Candle.")
-    print("=" * 80)

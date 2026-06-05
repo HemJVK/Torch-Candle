@@ -66,7 +66,6 @@ impl StreamAwareAllocator {
             if event.query() {
                 if let Some(block) = blocks.get_mut(&ptr) {
                     block.is_idle = true;
-                    println!("🚀 [StreamAwareAllocator] delayed_free: Block 0x{:x} is now idle (event completed)", ptr);
                 }
             } else {
                 remaining.push_back((event, ptr));
@@ -130,7 +129,6 @@ impl StreamAwareAllocator {
                 };
                 
                 if safe_to_reuse {
-                    println!("🚀 [StreamAwareAllocator] blockFree: Reusing block address 0x{:x} from stream {} (now stream {})", block.ptr, block.stream_id, stream_id);
                     block.is_idle = false;
                     block.stream_id = stream_id;
                     block.tag = tag.clone();
@@ -174,9 +172,6 @@ impl StreamAwareAllocator {
         
         let mut free_queue = self.free_queue.lock().unwrap();
         free_queue.push_back((event, ptr));
-        
-        println!("🚀 [StreamAwareAllocator] free: Queued pointer address 0x{:x} for delayed deletion on stream {}", ptr, stream_id);
-        
         Ok(())
     }
 
@@ -185,7 +180,6 @@ impl StreamAwareAllocator {
         if let Some(block) = blocks.get_mut(&ptr) {
             if !block.recorded_streams.contains(&stream_id) {
                 block.recorded_streams.push(stream_id);
-                println!("🚀 [StreamAwareAllocator] record_stream: Block 0x{:x} now tracked on stream {}", ptr, stream_id);
             }
             Ok(())
         } else {
@@ -199,7 +193,6 @@ impl StreamAwareAllocator {
         let mut blocks = self.blocks.lock().unwrap();
         if let Some(block) = blocks.get_mut(&ptr) {
             block.is_idle = true;
-            println!("🚀 [StreamAwareAllocator] cudaFree(): API-level logical release of block 0x{:x}", ptr);
         }
         Ok(())
     }
@@ -208,7 +201,6 @@ impl StreamAwareAllocator {
         let mut blocks = self.blocks.lock().unwrap();
         blocks.retain(|_, block| {
             if block.is_idle && block.recorded_streams.is_empty() {
-                println!("🚀 [StreamAwareAllocator] Proactive Reclaim: Freeing address 0x{:x} from heap", block.ptr);
                 false
             } else {
                 true

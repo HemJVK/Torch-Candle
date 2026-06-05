@@ -1,6 +1,8 @@
 import subprocess
 import shutil
-import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ROCmAOTCompiler:
     """
@@ -14,10 +16,10 @@ class ROCmAOTCompiler:
     @staticmethod
     def compile_kernels_aot(source_file: str, output_so: str) -> bool:
         if not ROCmAOTCompiler.is_hipcc_available():
-            print("⚠️ [ROCmAOTCompiler] hipcc compiler not found in PATH. Skipping AOT compilation.")
+            logger.warning("[ROCmAOTCompiler] hipcc compiler not found in PATH. Skipping AOT compilation.")
             return False
-            
-        print(f"🚀 [ROCmAOTCompiler] Compiling {source_file} Ahead-of-Time using hipcc...")
+
+        logger.info("[ROCmAOTCompiler] Compiling %s ahead-of-time using hipcc...", source_file)
         cmd = [
             "hipcc",
             "-shared",
@@ -27,11 +29,11 @@ class ROCmAOTCompiler:
             "-o",
             output_so
         ]
-        
+
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            print(f"🚀 [ROCmAOTCompiler] AOT compilation successful: {output_so}")
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            logger.info("[ROCmAOTCompiler] AOT compilation successful: %s", output_so)
             return True
         except subprocess.CalledProcessError as e:
-            print(f"❌ [ROCmAOTCompiler] hipcc compilation failed:\n{e.stderr}")
+            logger.error("[ROCmAOTCompiler] hipcc compilation failed:\n%s", e.stderr)
             return False

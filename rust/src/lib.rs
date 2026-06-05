@@ -65,10 +65,7 @@ mod ipc;
 mod allocator;
 mod jit;
 
-#[allow(dead_code)]
-static ENABLE_SHA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-#[allow(dead_code)]
-static GRAD_HISTORY: Mutex<Option<HashMap<usize, Vec<f32>>>> = Mutex::new(None);
+
 
 thread_local! {
     static KERNEL_CALL_COUNT: std::cell::Cell<usize> = std::cell::Cell::new(0);
