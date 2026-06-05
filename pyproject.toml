@@ -3,6 +3,7 @@ name = "torch_candle"
 version = "0.1.1"
 description = "A PyTorch-compatible API with Candle backend"
 readme = "README.md"
+license = { file = "LICENSE" }
 authors = [
     { name = "Hem", email = "[EMAIL_ADDRESS]" }
 ]
@@ -28,6 +29,7 @@ features = ["pyo3/extension-module"]
 module-name = "torch_candle_backend"
 manifest-path = "rust/Cargo.toml"
 python-packages = ["torch_candle"]
+sdist-include = ["LICENSE"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
