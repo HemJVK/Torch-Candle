@@ -912,6 +912,17 @@ impl OpNode for Conv2dNode {
     }
 }
 
+struct AffineNode {
+    mul_scalar: f64,
+}
+impl OpNode for AffineNode {
+    fn name(&self) -> &str { "Affine" }
+    fn backward(&self, grad: &Tensor) -> Vec<Option<Tensor>> {
+        let g = grad.affine(self.mul_scalar, 0.0).unwrap();
+        vec![Some(g)]
+    }
+}
+
 #[pyclass]
 #[derive(Clone)]
 pub struct PyTensor {
@@ -1558,7 +1569,20 @@ impl PyTensor {
     fn affine(&self, mul_scalar: f64, add_scalar: f64) -> PyResult<Self> {
         let inner = self.inner.affine(mul_scalar, add_scalar)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
-        Ok(PyTensor { inner, grad: None, grad_fn: None, requires_grad: false, parents: Vec::new() })
+        let requires_grad = self.requires_grad;
+        let mut grad_fn = None;
+        let mut parents = Vec::new();
+        if requires_grad {
+            grad_fn = Some(Arc::new(AffineNode { mul_scalar }) as Arc<dyn OpNode>);
+            parents.push(self.clone());
+        }
+        Ok(PyTensor {
+            inner,
+            grad: if requires_grad { Some(Arc::new(Mutex::new(None))) } else { None },
+            grad_fn,
+            requires_grad,
+            parents,
+        })
     }
 
     fn clamp(&self, min: f64, max: f64) -> PyResult<Self> {
