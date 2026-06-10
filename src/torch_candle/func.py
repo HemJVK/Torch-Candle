@@ -267,7 +267,8 @@ def grad(func, argnums=0):
             if getattr(Tensor, "enable_sha", True) and not disable_ema:
                 if has_anomaly:
                     if x_grad._grad_history_list:
-                        beta = 0.9
+                        # Read beta from Rust backend — configured via set_sha_beta()
+                        beta = _kernels.get_sha_beta()
                         g_prev = x_grad._grad_history_list[-1]
                         res = g_prev * beta
                         x_grad._grad_history_list.append(res)

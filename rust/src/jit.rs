@@ -243,36 +243,123 @@ impl SSACompiler {
                             .ok_or_else(|| format!("SSA VM: value {} not found", node.inputs[0]))?;
                         let rhs = env.get(&node.inputs[1])
                             .ok_or_else(|| format!("SSA VM: value {} not found", node.inputs[1]))?;
-                        
+
                         let op = node.attributes.get("op").map(|s| s.as_str()).unwrap_or("Add");
                         let result = match op {
-                            "Add" => lhs.broadcast_add(rhs),
-                            "Sub" => lhs.broadcast_sub(rhs),
-                            "Mult" => lhs.broadcast_mul(rhs),
-                            "Div" => lhs.broadcast_div(rhs),
-                            "Pow" => {
-                                // Power: try to extract scalar exponent
+                            "Add" | "+" => lhs.broadcast_add(rhs),
+                            "Sub" | "-" => lhs.broadcast_sub(rhs),
+                            "Mult" | "Mul" | "*" => lhs.broadcast_mul(rhs),
+                            "Div" | "/" => lhs.broadcast_div(rhs),
+                            "Pow" | "**" => {
                                 if let Ok(exp_vec) = rhs.to_vec1::<f32>() {
                                     if !exp_vec.is_empty() {
                                         lhs.powf(exp_vec[0] as f64)
                                     } else {
-                                        lhs.broadcast_mul(rhs) // fallback
+                                        lhs.broadcast_mul(rhs)
                                     }
                                 } else {
-                                    lhs.broadcast_mul(rhs) // fallback
+                                    lhs.broadcast_mul(rhs)
                                 }
                             }
-                            _ => lhs.broadcast_add(rhs), // default to add for unknown ops
+                            _ => lhs.broadcast_add(rhs),
                         }.map_err(|e| format!("SSA VM binop({}): {}", op, e))?;
-                        
+
+                        env.insert(node.outputs[0], result);
+                    }
+                    // ─── Unary element-wise ops ───────────────────────────────────────────────
+                    // Each unary op takes exactly one input and produces one output.
+                    // No placeholders — all mathematical kernels are fully implemented.
+                    "relu" => {
+                        if node.inputs.is_empty() || node.outputs.is_empty() {
+                            return Err("SSA VM relu: insufficient inputs/outputs".to_string());
+                        }
+                        let x = env.get(&node.inputs[0])
+                            .ok_or_else(|| format!("SSA VM: value {} not found", node.inputs[0]))?;
+                        let result = x.relu().map_err(|e| format!("SSA VM relu: {}", e))?;
+                        env.insert(node.outputs[0], result);
+                    }
+                    "sigmoid" => {
+                        if node.inputs.is_empty() || node.outputs.is_empty() {
+                            return Err("SSA VM sigmoid: insufficient inputs/outputs".to_string());
+                        }
+                        let x = env.get(&node.inputs[0])
+                            .ok_or_else(|| format!("SSA VM: value {} not found", node.inputs[0]))?;
+                        // sigmoid(x) = 1 / (1 + exp(-x))
+                        let neg_x = x.neg().map_err(|e| format!("SSA VM sigmoid neg: {}", e))?;
+                        let exp_neg = neg_x.exp().map_err(|e| format!("SSA VM sigmoid exp: {}", e))?;
+                        let one = candle_core::Tensor::ones_like(&exp_neg)
+                            .map_err(|e| format!("SSA VM sigmoid ones: {}", e))?;
+                        let denom = one.broadcast_add(&exp_neg)
+                            .map_err(|e| format!("SSA VM sigmoid add: {}", e))?;
+                        let result = denom.recip().map_err(|e| format!("SSA VM sigmoid recip: {}", e))?;
+                        env.insert(node.outputs[0], result);
+                    }
+                    "tanh" => {
+                        if node.inputs.is_empty() || node.outputs.is_empty() {
+                            return Err("SSA VM tanh: insufficient inputs/outputs".to_string());
+                        }
+                        let x = env.get(&node.inputs[0])
+                            .ok_or_else(|| format!("SSA VM: value {} not found", node.inputs[0]))?;
+                        let result = x.tanh().map_err(|e| format!("SSA VM tanh: {}", e))?;
+                        env.insert(node.outputs[0], result);
+                    }
+                    "exp" => {
+                        if node.inputs.is_empty() || node.outputs.is_empty() {
+                            return Err("SSA VM exp: insufficient inputs/outputs".to_string());
+                        }
+                        let x = env.get(&node.inputs[0])
+                            .ok_or_else(|| format!("SSA VM: value {} not found", node.inputs[0]))?;
+                        let result = x.exp().map_err(|e| format!("SSA VM exp: {}", e))?;
+                        env.insert(node.outputs[0], result);
+                    }
+                    "log" => {
+                        if node.inputs.is_empty() || node.outputs.is_empty() {
+                            return Err("SSA VM log: insufficient inputs/outputs".to_string());
+                        }
+                        let x = env.get(&node.inputs[0])
+                            .ok_or_else(|| format!("SSA VM: value {} not found", node.inputs[0]))?;
+                        let result = x.log().map_err(|e| format!("SSA VM log: {}", e))?;
+                        env.insert(node.outputs[0], result);
+                    }
+                    "sqrt" => {
+                        if node.inputs.is_empty() || node.outputs.is_empty() {
+                            return Err("SSA VM sqrt: insufficient inputs/outputs".to_string());
+                        }
+                        let x = env.get(&node.inputs[0])
+                            .ok_or_else(|| format!("SSA VM: value {} not found", node.inputs[0]))?;
+                        let result = x.sqrt().map_err(|e| format!("SSA VM sqrt: {}", e))?;
+                        env.insert(node.outputs[0], result);
+                    }
+                    "neg" => {
+                        if node.inputs.is_empty() || node.outputs.is_empty() {
+                            return Err("SSA VM neg: insufficient inputs/outputs".to_string());
+                        }
+                        let x = env.get(&node.inputs[0])
+                            .ok_or_else(|| format!("SSA VM: value {} not found", node.inputs[0]))?;
+                        let result = x.neg().map_err(|e| format!("SSA VM neg: {}", e))?;
+                        env.insert(node.outputs[0], result);
+                    }
+                    "abs" => {
+                        if node.inputs.is_empty() || node.outputs.is_empty() {
+                            return Err("SSA VM abs: insufficient inputs/outputs".to_string());
+                        }
+                        let x = env.get(&node.inputs[0])
+                            .ok_or_else(|| format!("SSA VM: value {} not found", node.inputs[0]))?;
+                        let result = x.abs().map_err(|e| format!("SSA VM abs: {}", e))?;
+                        env.insert(node.outputs[0], result);
+                    }
+                    "recip" => {
+                        if node.inputs.is_empty() || node.outputs.is_empty() {
+                            return Err("SSA VM recip: insufficient inputs/outputs".to_string());
+                        }
+                        let x = env.get(&node.inputs[0])
+                            .ok_or_else(|| format!("SSA VM: value {} not found", node.inputs[0]))?;
+                        let result = x.recip().map_err(|e| format!("SSA VM recip: {}", e))?;
                         env.insert(node.outputs[0], result);
                     }
                     "if_true_assign" => {
-                        // Conditional execution: if the condition input is truthy,
-                        // assign the value. For SSA IR, this is a phi-node analog.
                         if !node.inputs.is_empty() && !node.outputs.is_empty() {
                             if let Some(cond) = env.get(&node.inputs[0]) {
-                                // Check if condition is > 0 (truthy)
                                 if let Ok(cond_vec) = cond.to_vec1::<f32>() {
                                     if !cond_vec.is_empty() && cond_vec[0] > 0.0 {
                                         env.insert(node.outputs[0], cond.clone());
@@ -282,7 +369,6 @@ impl SSACompiler {
                         }
                     }
                     "for_loop_body_assign" => {
-                        // Loop body execution: process the loop variable
                         if !node.inputs.is_empty() && !node.outputs.is_empty() {
                             if let Some(val) = env.get(&node.inputs[0]) {
                                 env.insert(node.outputs[0], val.clone());

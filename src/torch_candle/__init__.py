@@ -75,6 +75,12 @@ except ImportError:
     pass
 
 try:
+    from . import aot
+    from .aot import make_fx, aot_cache_size, aot_cache_clear
+except ImportError:
+    pass
+
+try:
     from .ast_parser import RustASTParser
     from torch_candle_backend import NativeASTParser, VmapDispatcher
 except ImportError:

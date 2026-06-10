@@ -1,8 +1,11 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use pyo3::prelude::*;
 use pyo3::ffi;
 use std::os::raw::c_int;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// §1 TaskMetadata — Plain-Old-Data message payload; must remain Copy + Repr(C)
+// ─────────────────────────────────────────────────────────────────────────────
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 #[pyclass]
@@ -63,15 +66,102 @@ impl TaskMetadata {
     }
 }
 
-// Enforce physical separation of exactly 128 bytes of padding between atomic indices
+// ─────────────────────────────────────────────────────────────────────────────
+// §1 Cache-Line Aligned Atomic Wrappers
+//
+// #[repr(C, align(128))] guarantees each atomic index occupies its own
+// 128-byte physical cache line, preventing False Sharing via MESI protocol.
+// AtomicU64 is used exactly as specified (8 bytes), with 120 bytes of padding.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Producer write pointer — 128-byte aligned, occupies a dedicated cache line.
+#[repr(C, align(128))]
+pub struct CacheAlignedHead {
+    /// Monotonically increasing. Producer writes with Release semantics.
+    pub index: AtomicU64,
+    _pad: [u8; 120],
+}
+
+/// Consumer read pointer — 128-byte aligned, occupies a dedicated cache line.
+#[repr(C, align(128))]
+pub struct CacheAlignedTail {
+    /// Monotonically increasing. Consumer writes with Release semantics.
+    pub index: AtomicU64,
+    _pad: [u8; 120],
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §1 Secondary String Slab Allocator
+//
+// Fixed-offset access to variable-length metadata within the shared memory
+// segment. Eliminates passing pointers (Box, Vec, &str) across the FFI
+// boundary — all data is addressed by (offset, length) pairs.
+// ─────────────────────────────────────────────────────────────────────────────
+const SLAB_CAPACITY: usize = 65536; // 64 KB
+
+#[repr(C)]
+pub struct StringSlab {
+    /// Next free byte offset into `data`. Incremented atomically.
+    pub write_offset: AtomicU64,
+    _pad: [u8; 56],
+    pub data: [u8; SLAB_CAPACITY],
+}
+
+impl StringSlab {
+    /// Allocate bytes in the slab. Returns the byte offset, or None if full.
+    pub fn write(&self, bytes: &[u8]) -> Option<u32> {
+        let len = bytes.len();
+        if len == 0 {
+            return Some(0);
+        }
+        let offset = self.write_offset.fetch_add(len as u64, Ordering::AcqRel) as usize;
+        if offset + len > SLAB_CAPACITY {
+            return None;
+        }
+        unsafe {
+            let dst = self.data.as_ptr().add(offset) as *mut u8;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, len);
+        }
+        Some(offset as u32)
+    }
+
+    /// Read bytes from the slab at offset. Returns None if out of bounds.
+    pub fn read(&self, offset: u32, len: usize) -> Option<&[u8]> {
+        let start = offset as usize;
+        if start + len > SLAB_CAPACITY {
+            return None;
+        }
+        unsafe {
+            let ptr = self.data.as_ptr().add(start);
+            Some(std::slice::from_raw_parts(ptr, len))
+        }
+    }
+
+    pub fn reset(&self) {
+        self.write_offset.store(0, Ordering::Release);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §1 SPSC Ring Buffer Layout
+//
+// Memory map:
+//   Offset   0: Head (CacheAlignedHead) — 128 bytes
+//   Offset 128: Tail (CacheAlignedTail) — 128 bytes
+//   Offset 256: StringSlab              — ~64 KB
+//   Offset ~64K: Data Segment ([TaskMetadata; 1024])
+// ─────────────────────────────────────────────────────────────────────────────
 #[repr(C)]
 pub struct SPSCRingBufferLayout {
-    pub head: AtomicUsize,
-    pub padding: [u8; 128],
-    pub tail: AtomicUsize,
+    pub head: CacheAlignedHead,
+    pub tail: CacheAlignedTail,
+    pub string_slab: StringSlab,
     pub buffer: [TaskMetadata; 1024],
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// §1 SPSCRingBuffer — Python-exposed handle
+// ─────────────────────────────────────────────────────────────────────────────
 #[pyclass]
 pub struct SPSCRingBuffer {
     raw_ptr: *mut SPSCRingBufferLayout,
@@ -84,11 +174,7 @@ unsafe impl Sync for SPSCRingBuffer {}
 
 impl Clone for SPSCRingBuffer {
     fn clone(&self) -> Self {
-        Self {
-            raw_ptr: self.raw_ptr,
-            is_owner: false,
-            is_mmap: self.is_mmap,
-        }
+        Self { raw_ptr: self.raw_ptr, is_owner: false, is_mmap: self.is_mmap }
     }
 }
 
@@ -104,37 +190,25 @@ impl SPSCRingBuffer {
                 let size = std::mem::size_of::<SPSCRingBufferLayout>();
                 libc::ftruncate(fd, size as libc::off_t);
                 let raw_ptr = libc::mmap(
-                    std::ptr::null_mut(),
-                    size,
+                    std::ptr::null_mut(), size,
                     libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_SHARED,
-                    fd,
-                    0,
+                    libc::MAP_SHARED, fd, 0,
                 );
                 libc::close(fd);
                 if raw_ptr != libc::MAP_FAILED {
                     std::ptr::write_bytes(raw_ptr, 0, size);
-                    return Self {
-                        raw_ptr: raw_ptr as *mut SPSCRingBufferLayout,
-                        is_owner: true,
-                        is_mmap: true,
-                    };
+                    return Self { raw_ptr: raw_ptr as *mut SPSCRingBufferLayout, is_owner: true, is_mmap: true };
                 }
             }
         }
-
-        // Fallback to heap allocation using std::alloc to avoid stack overflow
+        // Fallback to heap allocation
         unsafe {
             let layout = std::alloc::Layout::new::<SPSCRingBufferLayout>();
             let raw_ptr = std::alloc::alloc_zeroed(layout) as *mut SPSCRingBufferLayout;
             if raw_ptr.is_null() {
                 std::alloc::handle_alloc_error(layout);
             }
-            Self {
-                raw_ptr,
-                is_owner: true,
-                is_mmap: false,
-            }
+            Self { raw_ptr, is_owner: true, is_mmap: false }
         }
     }
 
@@ -151,32 +225,19 @@ impl SPSCRingBuffer {
                 return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to open mmap file: {}", path)));
             }
             let size = std::mem::size_of::<SPSCRingBufferLayout>();
-            if is_owner {
-                libc::ftruncate(fd, size as libc::off_t);
-            }
+            if is_owner { libc::ftruncate(fd, size as libc::off_t); }
             let raw_ptr = libc::mmap(
-                std::ptr::null_mut(),
-                size,
+                std::ptr::null_mut(), size,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
+                libc::MAP_SHARED, fd, 0,
             );
             if raw_ptr == libc::MAP_FAILED {
                 libc::close(fd);
                 return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("mmap failed"));
             }
             libc::close(fd);
-            
-            if is_owner {
-                std::ptr::write_bytes(raw_ptr, 0, size);
-            }
-            
-            Ok(Self {
-                raw_ptr: raw_ptr as *mut SPSCRingBufferLayout,
-                is_owner,
-                is_mmap: true,
-            })
+            if is_owner { std::ptr::write_bytes(raw_ptr, 0, size); }
+            Ok(Self { raw_ptr: raw_ptr as *mut SPSCRingBufferLayout, is_owner, is_mmap: true })
         }
     }
 
@@ -186,25 +247,17 @@ impl SPSCRingBuffer {
                 "Validation Failed: Shared memory segment is not actively instantiated and mapped!"
             ));
         }
-        
         unsafe {
-            // Verify readability and writability of head and tail atomic fields
             let layout = &*self.raw_ptr;
-            let head = layout.head.load(Ordering::Acquire);
-            layout.head.store(head, Ordering::Release);
-            
-            // Check accessibility of the buffer pages using mincore (Linux only) or a dry read/write
+            let head = layout.head.index.load(Ordering::Acquire);
+            layout.head.index.store(head, Ordering::Release);
             #[cfg(target_os = "linux")]
             {
                 let size = std::mem::size_of::<SPSCRingBufferLayout>();
                 let page_size = 4096;
                 let pages = (size + page_size - 1) / page_size;
                 let mut vec = vec![0u8; pages];
-                let res = libc::mincore(
-                    self.raw_ptr as *mut libc::c_void,
-                    size,
-                    vec.as_mut_ptr(),
-                );
+                let res = libc::mincore(self.raw_ptr as *mut libc::c_void, size, vec.as_mut_ptr());
                 if res != 0 {
                     return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                         "Validation Failed: Shared memory segment page is not resident/accessible!"
@@ -215,16 +268,63 @@ impl SPSCRingBuffer {
         Ok(true)
     }
 
+    /// Verify head/tail indices are separated by exactly 128 bytes.
     pub fn verify_128_padding(&self) -> PyResult<bool> {
         unsafe {
             let layout = &*self.raw_ptr;
-            let head_addr = &layout.head as *const AtomicUsize as usize;
-            let tail_addr = &layout.tail as *const AtomicUsize as usize;
+            let head_addr = &layout.head.index as *const AtomicU64 as usize;
+            let tail_addr = &layout.tail.index as *const AtomicU64 as usize;
             let diff = tail_addr - head_addr;
-            // 8 bytes for AtomicUsize + 128 bytes padding = 136 bytes difference
-            Ok(diff == 136)
+            Ok(diff == 128)
         }
     }
+
+    /// Verify head and tail structs are aligned to 128-byte boundaries.
+    pub fn verify_cache_alignment(&self) -> PyResult<bool> {
+        unsafe {
+            let layout = &*self.raw_ptr;
+            let head_addr = &layout.head as *const CacheAlignedHead as usize;
+            let tail_addr = &layout.tail as *const CacheAlignedTail as usize;
+            Ok(head_addr % 128 == 0 && tail_addr % 128 == 0)
+        }
+    }
+
+    // ── String Slab Python API ────────────────────────────────────────────────
+
+    /// Write bytes into the secondary string slab. Returns byte offset.
+    pub fn slab_write(&self, data: Vec<u8>) -> PyResult<u32> {
+        let layout = unsafe { &*self.raw_ptr };
+        layout.string_slab.write(&data).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "StringSlab exhausted: 64KB slab capacity exceeded."
+            )
+        })
+    }
+
+    /// Read bytes from the string slab at the given offset.
+    pub fn slab_read(&self, offset: u32, length: usize) -> PyResult<Vec<u8>> {
+        let layout = unsafe { &*self.raw_ptr };
+        let slice = layout.string_slab.read(offset, length).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "StringSlab read out of bounds: offset + length exceeds slab capacity."
+            )
+        })?;
+        Ok(slice.to_vec())
+    }
+
+    /// Reset the string slab write pointer (producer-side only).
+    pub fn slab_reset(&self) {
+        let layout = unsafe { &*self.raw_ptr };
+        layout.string_slab.reset();
+    }
+
+    /// Returns the current slab write offset (bytes consumed).
+    pub fn slab_usage(&self) -> u64 {
+        let layout = unsafe { &*self.raw_ptr };
+        layout.string_slab.write_offset.load(Ordering::Acquire)
+    }
+
+    // ── PyBuffer Protocol ─────────────────────────────────────────────────────
 
     unsafe fn __getbuffer__(
         slf: pyo3::Bound<'_, Self>,
@@ -233,47 +333,38 @@ impl SPSCRingBuffer {
     ) -> PyResult<()> {
         let size = std::mem::size_of::<SPSCRingBufferLayout>();
         let self_ref = slf.borrow();
-        // Pass the owning Python object as `obj` per PEP 3118 — never null.
-        // This ensures Python's refcount keeps the buffer alive while the view exists.
         let obj_ptr = slf.as_ptr();
         let ret = ffi::PyBuffer_FillInfo(
-            view,
-            obj_ptr,
+            view, obj_ptr,
             self_ref.raw_ptr as *mut std::ffi::c_void,
-            size as isize,
-            0,  // writable
-            flags,
+            size as isize, 0, flags,
         );
         if ret < 0 {
             return Err(PyErr::fetch(slf.py()));
         }
-        // PyBuffer_FillInfo already calls Py_INCREF on obj when obj is non-null
         Ok(())
     }
 
-    unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {
-        // PyBuffer_Release handles Py_DECREF on obj automatically.
-        // No manual cleanup required for our contiguous flat buffer.
-    }
-}
+    unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {}
 
-impl SPSCRingBuffer {
+    // ── §1 SPSC Operations — Acquire/Release Synchronization Protocol ──────────
+
+    /// Producer: write message and increment head with Release semantics.
+    /// The data write is guaranteed visible before the index update is observed.
     pub fn push(&self, op_code: u32, device_id: u32, payload_bytes: Vec<u8>) -> PyResult<()> {
         if !self.is_mmap {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "CRITICAL_FFI_SERIALIZATION_ERROR: PyBuffer is not explicitly detected as the transport layer. Pipeline aborted."
+                "CRITICAL_FFI_SERIALIZATION_ERROR: PyBuffer not detected. Pipeline aborted."
             ));
         }
         let layout = unsafe { &mut *self.raw_ptr };
-        let head = layout.head.load(Ordering::Relaxed);
-        
+        let head = layout.head.index.load(Ordering::Relaxed);
+
+        // Three-Stage Wait Strategy: spin → yield → futex
         let start = std::time::Instant::now();
         loop {
-            let tail = layout.tail.load(Ordering::Acquire);
-            if head.wrapping_sub(tail) < 1024 {
-                break;
-            }
-            
+            let tail = layout.tail.index.load(Ordering::Acquire);
+            if head.wrapping_sub(tail) < 1024 { break; }
             let elapsed = start.elapsed().as_micros();
             if elapsed < 50 {
                 std::hint::spin_loop();
@@ -284,7 +375,7 @@ impl SPSCRingBuffer {
                 unsafe {
                     libc::syscall(
                         libc::SYS_futex,
-                        &layout.tail as *const AtomicUsize as *mut i32,
+                        &layout.tail.index as *const AtomicU64 as *mut i32,
                         libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
                         tail as i32,
                         std::ptr::null::<libc::timespec>(),
@@ -293,89 +384,78 @@ impl SPSCRingBuffer {
                     );
                 }
                 #[cfg(not(target_os = "linux"))]
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
-        
-        let index = head % 1024;
+
+        let index = (head % 1024) as usize;
         let mut data_buffer = [0u8; 4096];
         let copy_len = payload_bytes.len().min(4096);
         data_buffer[..copy_len].copy_from_slice(&payload_bytes[..copy_len]);
-        
+
         layout.buffer[index] = TaskMetadata {
-            op_code,
-            tensor_id: device_id as u64,
-            data_buffer,
-            metadata_flat: [0.0; 128],
-            padding: [0; 128],
+            op_code, tensor_id: device_id as u64,
+            data_buffer, metadata_flat: [0.0; 128], padding: [0; 128],
         };
-        
-        layout.head.store(head.wrapping_add(1), Ordering::Release);
-        
+
+        // Release: guarantees data write visible before index update
+        layout.head.index.store(head.wrapping_add(1), Ordering::Release);
+
         #[cfg(target_os = "linux")]
         unsafe {
             libc::syscall(
                 libc::SYS_futex,
-                &layout.head as *const AtomicUsize as *mut i32,
+                &layout.head.index as *const AtomicU64 as *mut i32,
                 libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
-                1 as libc::c_int,
+                1i32,
             );
         }
-        
         Ok(())
     }
 
+    /// Consumer: read head with Acquire semantics; returns None if empty.
     pub fn pop(&self) -> PyResult<Option<TaskMetadata>> {
         if !self.is_mmap {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "CRITICAL_FFI_SERIALIZATION_ERROR: PyBuffer is not explicitly detected as the transport layer. Pipeline aborted."
+                "CRITICAL_FFI_SERIALIZATION_ERROR: PyBuffer not detected. Pipeline aborted."
             ));
         }
         let layout = unsafe { &mut *self.raw_ptr };
-        let head = layout.head.load(Ordering::Acquire);
-        let tail = layout.tail.load(Ordering::Relaxed);
-        
-        if tail == head {
-            return Ok(None);
-        }
-        
-        let index = tail % 1024;
+        let head = layout.head.index.load(Ordering::Acquire);
+        let tail = layout.tail.index.load(Ordering::Relaxed);
+        if tail == head { return Ok(None); }
+
+        let index = (tail % 1024) as usize;
         let task = layout.buffer[index];
-        
-        layout.tail.store(tail.wrapping_add(1), Ordering::Release);
-        
+        layout.tail.index.store(tail.wrapping_add(1), Ordering::Release);
+
         #[cfg(target_os = "linux")]
         unsafe {
             libc::syscall(
                 libc::SYS_futex,
-                &layout.tail as *const AtomicUsize as *mut i32,
+                &layout.tail.index as *const AtomicU64 as *mut i32,
                 libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
-                1 as libc::c_int,
+                1i32,
             );
         }
-        
         Ok(Some(task))
     }
 
+    /// Blocking consumer: waits for a message using 3-stage wait strategy.
     pub fn wait_and_pop(&self, py: Python<'_>) -> PyResult<TaskMetadata> {
         if !self.is_mmap {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "CRITICAL_FFI_SERIALIZATION_ERROR: PyBuffer is not explicitly detected as the transport layer. Pipeline aborted."
+                "CRITICAL_FFI_SERIALIZATION_ERROR: PyBuffer not detected. Pipeline aborted."
             ));
         }
         let layout = unsafe { &mut *self.raw_ptr };
-        let tail = layout.tail.load(Ordering::Relaxed);
-        
+        let tail = layout.tail.index.load(Ordering::Relaxed);
+
         py.allow_threads(|| {
             let start = std::time::Instant::now();
             loop {
-                let current_head = layout.head.load(Ordering::Acquire);
-                if current_head != tail {
-                    break;
-                }
-                
+                let current_head = layout.head.index.load(Ordering::Acquire);
+                if current_head != tail { break; }
                 let elapsed = start.elapsed().as_micros();
                 if elapsed < 50 {
                     std::hint::spin_loop();
@@ -386,7 +466,7 @@ impl SPSCRingBuffer {
                     unsafe {
                         libc::syscall(
                             libc::SYS_futex,
-                            &layout.head as *const AtomicUsize as *mut i32,
+                            &layout.head.index as *const AtomicU64 as *mut i32,
                             libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
                             current_head as i32,
                             std::ptr::null::<libc::timespec>(),
@@ -395,28 +475,25 @@ impl SPSCRingBuffer {
                         );
                     }
                     #[cfg(not(target_os = "linux"))]
-                    {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
             Ok::<(), PyErr>(())
         })?;
-        
-        let index = tail % 1024;
+
+        let index = (tail % 1024) as usize;
         let task = layout.buffer[index];
-        layout.tail.store(tail.wrapping_add(1), Ordering::Release);
-        
+        layout.tail.index.store(tail.wrapping_add(1), Ordering::Release);
+
         #[cfg(target_os = "linux")]
         unsafe {
             libc::syscall(
                 libc::SYS_futex,
-                &layout.tail as *const AtomicUsize as *mut i32,
+                &layout.tail.index as *const AtomicU64 as *mut i32,
                 libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
-                1 as libc::c_int,
+                1i32,
             );
         }
-        
         Ok(task)
     }
 }

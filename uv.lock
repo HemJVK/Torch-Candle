@@ -56,9 +56,9 @@ wheels = [
 
 [[package]]
 name = "ninja"
-version = "1.12.1"
+version = "1.13.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/6c/90/f587c4516d141307dc0c39bd3b6436a206b7d69b7a74296709202444f493/ninja-1.12.1.tar.gz", hash = "sha256:28e21f696c2701d7fcf0413fca8b3f9d4576b2d7e50585e4e2462e8e6e722c69", size = 228353 }
+sdist = { url = "https://files.pythonhosted.org/packages/43/73/79a0b22fc731989c708068427579e840a6cf4e937fe7ae5c5d0b7356ac22/ninja-1.13.0.tar.gz", hash = "sha256:4a40ce995ded54d9dc24f8ea37ff3bf62ad192b547f6c7126e7e25045e76f978", size = 242558 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3c/74/d02409ed2aa865e051b7edda22ad416a39d81a84980f544f8de717cab133/ninja-1.13.0-py3-none-macosx_10_9_universal2.whl", hash = "sha256:fa2a8bfc62e31b08f83127d1613d10821775a0eb334197154c4d6067b7068ff1", size = 310125 },
     { url = "https://files.pythonhosted.org/packages/8e/de/6e1cd6b84b412ac1ef327b76f0641aeb5dcc01e9d3f9eee0286d0c34fd93/ninja-1.13.0-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:3d00c692fb717fd511abeb44b8c5d00340c36938c12d6538ba989fe764e79630", size = 177467 },
@@ -352,7 +352,7 @@ wheels = [
 
 [[package]]
 name = "torch-candle"
-version = "0.1.1"
+version = "2026.6.1"
 source = { editable = "." }
 dependencies = [
     { name = "ninja" },
