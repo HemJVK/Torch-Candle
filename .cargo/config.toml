@@ -4,3 +4,10 @@ rustflags = [
     "-C", "target-feature=+avx2,+fma,+bmi1,+bmi2,+lzcnt,+popcnt",
     "-C", "opt-level=3",
 ]
+
+[env]
+# GTX 1650 — SM 7.5 (Turing). Set CUDA_COMPUTE_CAP so candle-kernels nvcc targets
+# the correct architecture and does not rely on auto-detection via nvcc --help.
+CUDA_HOME = { value = "/usr/local/cuda", force = false }
+CUDA_PATH = { value = "/usr/local/cuda", force = false }
+CUDA_COMPUTE_CAP = { value = "75", force = false }

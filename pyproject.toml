@@ -25,7 +25,7 @@ requires = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "cuda"]
 module-name = "torch_candle_backend"
 manifest-path = "rust/Cargo.toml"
 python-packages = ["torch_candle"]

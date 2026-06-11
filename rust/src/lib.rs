@@ -2194,17 +2194,7 @@ impl PyTensor {
     fn sqrt(&self) -> PyResult<Self> {
         let inner = if matches!(self.inner.device(), Device::Cpu) {
             apply_simd_unary(&self.inner, "fast_sqrt", |s: &mut [f32]| {
-                use rayon::prelude::*;
-                use std::arch::x86_64::*;
-                s.par_chunks_mut(2048).for_each(|chunk| unsafe {
-                    let mut i = 0;
-                    while i + 8 <= chunk.len() {
-                        let v = _mm256_loadu_ps(chunk.as_ptr().add(i));
-                        _mm256_storeu_ps(chunk.as_mut_ptr().add(i), _mm256_sqrt_ps(v));
-                        i += 8;
-                    }
-                    for j in i..chunk.len() { chunk[j] = chunk[j].sqrt(); }
-                });
+                unsafe { crate::simd::simd_sqrt_slice(s); }
             })?
         } else {
             self.inner.sqrt().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
