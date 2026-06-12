@@ -54,30 +54,65 @@ Since Torch-Candle compiles native C++/Rust kernels during installation, ensure 
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-### ⚡ Installation using `uv` (Recommended — Ultra Fast)
-Install the package instantly utilizing Astral's high-speed Rust-powered `uv` package manager:
-```bash
-# Install in active virtual environment
-uv pip install torch-candle
+### ⚡ Installing with `uv` (Recommended)
+By default, standard installation builds the **CPU-only** version (optimized automatically for your system's instruction set, like AVX2 on x86 or NEON on ARM). 
 
-# Or add as a dependency in a uv-managed project
-uv add torch-candle
+To compile the library with hardware acceleration tailored to your system, use the following commands:
+
+#### 1. CPU-Only (Default)
+```bash
+uv pip install torch-candle
 ```
+
+#### 2. NVIDIA CUDA Acceleration (NVIDIA GPUs)
+Ensure the CUDA Toolkit is installed and `nvcc` is available in your `PATH`.
+*   **From a local git clone**:
+    ```bash
+    CUDA_HOME=/usr/local/cuda CUDA_COMPUTE_CAP=75 MATURIN_FEATURES="cuda" uv pip install --force-reinstall -e .
+    ```
+    *(Note: Set `CUDA_COMPUTE_CAP` to match your GPU architecture, e.g., `89` for Ada Lovelace, `80` for Ampere, `75` for Turing/GTX 1650).*
+*   **From PyPI (forcing a custom source build)**:
+    ```bash
+    MATURIN_FEATURES="cuda" uv pip install torch-candle --no-binary torch-candle
+    ```
+
+#### 3. Apple Silicon GPU / Metal (macOS)
+*   **From a local git clone**:
+    ```bash
+    MATURIN_FEATURES="metal,accelerate" uv pip install --force-reinstall -e .
+    ```
+*   **From PyPI (forcing a custom source build)**:
+    ```bash
+    MATURIN_FEATURES="metal,accelerate" uv pip install torch-candle --no-binary torch-candle
+    ```
+
+---
 
 ### 🐍 Standard Installation using `pip`
+Standard `pip` supports the exact same build variables by forcing a source distribution build:
 ```bash
-pip install torch-candle
+# NVIDIA CUDA
+MATURIN_FEATURES="cuda" pip install torch-candle --no-binary torch-candle
+
+# Apple Silicon GPU
+MATURIN_FEATURES="metal,accelerate" pip install torch-candle --no-binary torch-candle
 ```
+
+---
 
 ### 🛠️ Local Development Build
-To compile and install the extension locally for development:
+For active development in this repository, compile the Rust extension directly:
 ```bash
-# Build and link editable module using maturin + uv under the hood
-maturin develop
-
-# Or build via uv directly
-uv pip install -e .
+# Build and link the local editable module with CUDA
+CUDA_HOME=/usr/local/cuda CUDA_COMPUTE_CAP=75 .venv/bin/maturin develop --features "pyo3/extension-module,cuda"
 ```
+
+> [!IMPORTANT]
+> When running Python scripts locally using `uv run`, `uv` will automatically check `pyproject.toml` and rebuild the package using default features (CPU-only), overwriting your manual CUDA build. 
+> To prevent `uv` from overwriting your custom hardware build, always run with the `--no-sync` flag:
+> ```bash
+> uv run --no-sync your_script.py
+> ```
 
 ---
 
