@@ -195,6 +195,9 @@ fn propagate_ad_binary<F>(
 where
     F: Fn(&AdNodeData, &AdNodeData) -> PyResult<(PyTensor, PyTensor)>,
 {
+    if AD_REGISTRY.with(|reg| reg.borrow().is_empty()) {
+        return Ok(());
+    }
     let mut levels_to_propagate = Vec::new();
     AD_REGISTRY.with(|reg| {
         let reg_borrow = reg.borrow();
@@ -281,6 +284,9 @@ fn propagate_ad_unary<F>(
 where
     F: Fn(&AdNodeData) -> PyResult<(PyTensor, PyTensor)>,
 {
+    if AD_REGISTRY.with(|reg| reg.borrow().is_empty()) {
+        return Ok(());
+    }
     let mut levels_to_propagate = Vec::new();
     AD_REGISTRY.with(|reg| {
         let reg_borrow = reg.borrow();
@@ -1536,7 +1542,13 @@ impl PyTensor {
     fn add(&self, other: &PyTensor) -> PyResult<Self> {
         let (lhs, rhs) = self.align_devices(other)?;
         let (lhs_t, rhs_t) = self.broadcast_to_same_rank_tensors(&lhs, &rhs)?;
-        let inner = lhs_t.broadcast_add(&rhs_t).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let inner = if matches!(lhs.device(), Device::Cpu) && matches!(rhs.device(), Device::Cpu) && lhs.dims() == rhs.dims() {
+            apply_simd_binary(&lhs, &rhs, "add_simd", |l: &mut [f32], r: &[f32]| unsafe {
+                simd::simd_add_slice(l, r);
+            })?
+        } else {
+            lhs_t.broadcast_add(&rhs_t).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        };
         
         let requires_grad = self.requires_grad || other.requires_grad;
         let mut grad_fn = None;
@@ -1568,7 +1580,13 @@ impl PyTensor {
     fn sub(&self, other: &PyTensor) -> PyResult<Self> {
         let (lhs, rhs) = self.align_devices(other)?;
         let (lhs_t, rhs_t) = self.broadcast_to_same_rank_tensors(&lhs, &rhs)?;
-        let inner = lhs_t.broadcast_sub(&rhs_t).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let inner = if matches!(lhs.device(), Device::Cpu) && matches!(rhs.device(), Device::Cpu) && lhs.dims() == rhs.dims() {
+            apply_simd_binary(&lhs, &rhs, "sub_simd", |l: &mut [f32], r: &[f32]| unsafe {
+                simd::simd_sub_slice(l, r);
+            })?
+        } else {
+            lhs_t.broadcast_sub(&rhs_t).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        };
         
         let requires_grad = self.requires_grad || other.requires_grad;
         let mut grad_fn = None;
@@ -1657,7 +1675,13 @@ impl PyTensor {
     fn mul(&self, other: &PyTensor) -> PyResult<Self> {
         let (lhs, rhs) = self.align_devices(other)?;
         let (lhs_t, rhs_t) = self.broadcast_to_same_rank_tensors(&lhs, &rhs)?;
-        let inner = lhs_t.broadcast_mul(&rhs_t).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let inner = if matches!(lhs.device(), Device::Cpu) && matches!(rhs.device(), Device::Cpu) && lhs.dims() == rhs.dims() {
+            apply_simd_binary(&lhs, &rhs, "mul_simd", |l: &mut [f32], r: &[f32]| unsafe {
+                simd::simd_mul_slice(l, r);
+            })?
+        } else {
+            lhs_t.broadcast_mul(&rhs_t).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        };
         
         let requires_grad = self.requires_grad || other.requires_grad;
         let mut grad_fn = None;
@@ -1696,7 +1720,13 @@ impl PyTensor {
     fn div(&self, other: &PyTensor) -> PyResult<Self> {
         let (lhs, rhs) = self.align_devices(other)?;
         let (lhs_t, rhs_t) = self.broadcast_to_same_rank_tensors(&lhs, &rhs)?;
-        let inner = lhs_t.broadcast_div(&rhs_t).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let inner = if matches!(lhs.device(), Device::Cpu) && matches!(rhs.device(), Device::Cpu) && lhs.dims() == rhs.dims() {
+            apply_simd_binary(&lhs, &rhs, "div_simd", |l: &mut [f32], r: &[f32]| unsafe {
+                simd::simd_div_slice(l, r);
+            })?
+        } else {
+            lhs_t.broadcast_div(&rhs_t).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        };
         
         let requires_grad = self.requires_grad || other.requires_grad;
         let mut grad_fn = None;
@@ -1851,6 +1881,114 @@ impl PyTensor {
             requires_grad,
             parents,
         })
+    }
+
+    fn max_all(&self) -> PyResult<Self> {
+        let inner = if matches!(self.inner.device(), Device::Cpu) {
+            let (storage, layout) = self.inner.storage_and_layout();
+            let offset = layout.start_offset();
+            let n: usize = self.inner.dims().iter().product();
+            let m = match &*storage {
+                candle_core::Storage::Cpu(candle_core::CpuStorage::F32(vec)) =>
+                    kernels::fast_max_all(&vec[offset..offset + n]),
+                _ => { drop(storage);
+                    let data = self.inner.flatten_all().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+                        .to_vec1::<f32>().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+                    kernels::fast_max_all(&data)
+                }
+            };
+            Tensor::new(&[m], &Device::Cpu).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        } else {
+            self.inner.flatten_all().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+                .max_keepdim(0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        };
+        Ok(PyTensor { inner, grad: None, grad_fn: None, requires_grad: false, parents: Vec::new() })
+    }
+
+    fn min_all(&self) -> PyResult<Self> {
+        let inner = if matches!(self.inner.device(), Device::Cpu) {
+            let (storage, layout) = self.inner.storage_and_layout();
+            let offset = layout.start_offset();
+            let n: usize = self.inner.dims().iter().product();
+            let m = match &*storage {
+                candle_core::Storage::Cpu(candle_core::CpuStorage::F32(vec)) =>
+                    kernels::fast_min_all(&vec[offset..offset + n]),
+                _ => { drop(storage);
+                    let data = self.inner.flatten_all().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+                        .to_vec1::<f32>().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+                    kernels::fast_min_all(&data)
+                }
+            };
+            Tensor::new(&[m], &Device::Cpu).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        } else {
+            self.inner.flatten_all().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+                .min_keepdim(0).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        };
+        Ok(PyTensor { inner, grad: None, grad_fn: None, requires_grad: false, parents: Vec::new() })
+    }
+
+    fn std_all(&self, ddof: usize) -> PyResult<Self> {
+        let inner = if matches!(self.inner.device(), Device::Cpu) {
+            let (storage, layout) = self.inner.storage_and_layout();
+            let offset = layout.start_offset();
+            let n: usize = self.inner.dims().iter().product();
+            let s = match &*storage {
+                candle_core::Storage::Cpu(candle_core::CpuStorage::F32(vec)) =>
+                    kernels::fast_std_all(&vec[offset..offset + n], ddof),
+                _ => { drop(storage);
+                    let data = self.inner.flatten_all().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+                        .to_vec1::<f32>().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+                    kernels::fast_std_all(&data, ddof)
+                }
+            };
+            Tensor::new(&[s], &Device::Cpu).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("std_all: GPU not supported"));
+        };
+        Ok(PyTensor { inner, grad: None, grad_fn: None, requires_grad: false, parents: Vec::new() })
+    }
+
+    fn var_all(&self, ddof: usize) -> PyResult<Self> {
+        let inner = if matches!(self.inner.device(), Device::Cpu) {
+            let (storage, layout) = self.inner.storage_and_layout();
+            let offset = layout.start_offset();
+            let n: usize = self.inner.dims().iter().product();
+            let s = match &*storage {
+                candle_core::Storage::Cpu(candle_core::CpuStorage::F32(vec)) =>
+                    kernels::fast_std_all(&vec[offset..offset + n], ddof),
+                _ => { drop(storage);
+                    let data = self.inner.flatten_all().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+                        .to_vec1::<f32>().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+                    kernels::fast_std_all(&data, ddof)
+                }
+            };
+            let var_val = s * s;
+            Tensor::new(&[var_val], &Device::Cpu).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("var_all: GPU not supported"));
+        };
+        Ok(PyTensor { inner, grad: None, grad_fn: None, requires_grad: false, parents: Vec::new() })
+    }
+
+    fn norm_l2_all(&self) -> PyResult<Self> {
+        let inner = if matches!(self.inner.device(), Device::Cpu) {
+            let (storage, layout) = self.inner.storage_and_layout();
+            let offset = layout.start_offset();
+            let n: usize = self.inner.dims().iter().product();
+            let val = match &*storage {
+                candle_core::Storage::Cpu(candle_core::CpuStorage::F32(vec)) =>
+                    kernels::fast_norm_l2(&vec[offset..offset + n]),
+                _ => { drop(storage);
+                    let data = self.inner.flatten_all().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+                        .to_vec1::<f32>().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+                    kernels::fast_norm_l2(&data)
+                }
+            };
+            Tensor::new(&[val], &Device::Cpu).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("norm_l2_all: GPU not supported"));
+        };
+        Ok(PyTensor { inner, grad: None, grad_fn: None, requires_grad: false, parents: Vec::new() })
     }
 
     // ... (reshape, t, transpose, etc. should also record parents if requires_grad) ...
@@ -2014,7 +2152,13 @@ impl PyTensor {
     }
 
     fn relu(&self) -> PyResult<Self> {
-        let inner = self.inner.relu().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let inner = if matches!(self.inner.device(), Device::Cpu) {
+            apply_simd_unary(&self.inner, "relu_simd", |s: &mut [f32]| unsafe {
+                simd::simd_relu_slice(s);
+            })?
+        } else {
+            self.inner.relu().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        };
         let requires_grad = self.requires_grad;
         let mut grad_fn = None;
         let mut parents = Vec::new();
@@ -2369,7 +2513,14 @@ impl PyTensor {
     fn align_devices(&self, other: &PyTensor) -> PyResult<(Tensor, Tensor)> {
         let lhs_dev = self.inner.device();
         let rhs_dev = other.inner.device();
-        if format!("{:?}", lhs_dev) == format!("{:?}", rhs_dev) {
+        let is_same = match (lhs_dev, rhs_dev) {
+            (Device::Cpu, Device::Cpu) => true,
+            (Device::Cuda(_), Device::Cuda(_)) | (Device::Metal(_), Device::Metal(_)) => {
+                format!("{:?}", lhs_dev) == format!("{:?}", rhs_dev)
+            }
+            _ => false,
+        };
+        if is_same {
             Ok((self.inner.clone(), other.inner.clone()))
         } else {
             match (lhs_dev, rhs_dev) {
@@ -2461,24 +2612,67 @@ impl<F: Fn(&mut [f32]) + Send + Sync> InplaceOp1 for SimdUnaryOp<F> {
     }
 }
 
-/// Apply an inplace SIMD kernel on a cloned CPU tensor — true zero-copy mutation.
-/// We clone the tensor first so autograd graph is not mutated.
+struct SimdBinaryOp<'a, F: Fn(&mut [f32], &[f32]) + Send + Sync> {
+    rhs: &'a [f32],
+    name: &'static str,
+    func: F,
+}
+
+impl<'a, F: Fn(&mut [f32], &[f32]) + Send + Sync> InplaceOp1 for SimdBinaryOp<'a, F> {
+    fn name(&self) -> &'static str { self.name }
+    fn cpu_fwd(&self, storage: &mut CpuStorage, _layout: &Layout) -> candle_core::Result<()> {
+        match storage {
+            CpuStorage::F32(vec) => {
+                (self.func)(vec.as_mut_slice(), self.rhs);
+                Ok(())
+            }
+            _ => candle_core::bail!("SimdBinaryOp: only f32 supported"),
+        }
+    }
+}
+
+fn apply_simd_binary<F: Fn(&mut [f32], &[f32]) + Send + Sync + 'static>(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    name: &'static str,
+    kernel: F,
+) -> PyResult<Tensor> {
+    let lhs_cont = lhs.contiguous()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+    let rhs_cont = rhs.contiguous()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+
+    let (rhs_storage, _rhs_layout) = rhs_cont.storage_and_layout();
+    let rhs_slice = match &*rhs_storage {
+        candle_core::Storage::Cpu(candle_core::CpuStorage::F32(vec)) => vec.as_slice(),
+        _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("apply_simd_binary: CPU only")),
+    };
+
+    let zeros = lhs_cont.zeros_like()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+    let out = lhs_cont.add(&zeros)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+
+    let op = SimdBinaryOp { rhs: rhs_slice, name, func: kernel };
+    out.inplace_op1(&op)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+    Ok(out)
+}
+
 fn apply_simd_unary<F: Fn(&mut [f32]) + Send + Sync + 'static>(
     t: &Tensor,
-    _name: &'static str,
+    name: &'static str,
     kernel: F,
 ) -> PyResult<Tensor> {
     if !matches!(t.device(), Device::Cpu) {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("apply_simd_unary: CPU only"));
     }
-    let mut data = t.flatten_all()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
-        .to_vec1::<f32>()
+    let zeros = t.zeros_like()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
-    
-    kernel(&mut data);
-    
-    let out = Tensor::from_slice(&data, t.shape(), t.device())
+    let out = t.add(&zeros)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+    let op = SimdUnaryOp { name, func: kernel };
+    out.inplace_op1(&op)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
     Ok(out)
 }

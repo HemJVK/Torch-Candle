@@ -587,6 +587,8 @@ class Tensor(metaclass=TensorMeta):
         return ops.clamp(self, min, max)
 
     def std(self, dim=None, keepdim=False, unbiased=True):
+        if dim is None and self._device == 'cpu' and not self.requires_grad:
+            return self._fast_wrap(self._tensor.std_all(1 if unbiased else 0))
         if dim is None and self._device == 'cpu':
             arr = np.ascontiguousarray(self.numpy())
             val = _kernels.fast_std_kernel(arr, 1 if unbiased else 0)

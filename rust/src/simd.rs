@@ -190,6 +190,158 @@ mod x86_impl {
         }
         for j in i..data.len() { if data[j] < 0.0 { data[j] = 0.0; } }
     }
+
+    #[inline]
+    pub unsafe fn simd_add_slice(lhs: &mut [f32], rhs: &[f32]) {
+        use rayon::prelude::*;
+        lhs.par_chunks_mut(2048)
+           .zip(rhs.par_chunks(2048))
+           .for_each(|(l_chunk, r_chunk)| unsafe {
+               let mut i = 0;
+               while i + 32 <= l_chunk.len() {
+                   let vl0 = _mm256_loadu_ps(l_chunk.as_ptr().add(i));
+                   let vr0 = _mm256_loadu_ps(r_chunk.as_ptr().add(i));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i), _mm256_add_ps(vl0, vr0));
+
+                   let vl1 = _mm256_loadu_ps(l_chunk.as_ptr().add(i + 8));
+                   let vr1 = _mm256_loadu_ps(r_chunk.as_ptr().add(i + 8));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i + 8), _mm256_add_ps(vl1, vr1));
+
+                   let vl2 = _mm256_loadu_ps(l_chunk.as_ptr().add(i + 16));
+                   let vr2 = _mm256_loadu_ps(r_chunk.as_ptr().add(i + 16));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i + 16), _mm256_add_ps(vl2, vr2));
+
+                   let vl3 = _mm256_loadu_ps(l_chunk.as_ptr().add(i + 24));
+                   let vr3 = _mm256_loadu_ps(r_chunk.as_ptr().add(i + 24));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i + 24), _mm256_add_ps(vl3, vr3));
+
+                   i += 32;
+               }
+               while i + 8 <= l_chunk.len() {
+                   let vl = _mm256_loadu_ps(l_chunk.as_ptr().add(i));
+                   let vr = _mm256_loadu_ps(r_chunk.as_ptr().add(i));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i), _mm256_add_ps(vl, vr));
+                   i += 8;
+               }
+               for j in i..l_chunk.len() {
+                   l_chunk[j] += r_chunk[j];
+               }
+           });
+    }
+
+    #[inline]
+    pub unsafe fn simd_mul_slice(lhs: &mut [f32], rhs: &[f32]) {
+        use rayon::prelude::*;
+        lhs.par_chunks_mut(2048)
+           .zip(rhs.par_chunks(2048))
+           .for_each(|(l_chunk, r_chunk)| unsafe {
+               let mut i = 0;
+               while i + 32 <= l_chunk.len() {
+                   let vl0 = _mm256_loadu_ps(l_chunk.as_ptr().add(i));
+                   let vr0 = _mm256_loadu_ps(r_chunk.as_ptr().add(i));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i), _mm256_mul_ps(vl0, vr0));
+
+                   let vl1 = _mm256_loadu_ps(l_chunk.as_ptr().add(i + 8));
+                   let vr1 = _mm256_loadu_ps(r_chunk.as_ptr().add(i + 8));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i + 8), _mm256_mul_ps(vl1, vr1));
+
+                   let vl2 = _mm256_loadu_ps(l_chunk.as_ptr().add(i + 16));
+                   let vr2 = _mm256_loadu_ps(r_chunk.as_ptr().add(i + 16));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i + 16), _mm256_mul_ps(vl2, vr2));
+
+                   let vl3 = _mm256_loadu_ps(l_chunk.as_ptr().add(i + 24));
+                   let vr3 = _mm256_loadu_ps(r_chunk.as_ptr().add(i + 24));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i + 24), _mm256_mul_ps(vl3, vr3));
+
+                   i += 32;
+               }
+               while i + 8 <= l_chunk.len() {
+                   let vl = _mm256_loadu_ps(l_chunk.as_ptr().add(i));
+                   let vr = _mm256_loadu_ps(r_chunk.as_ptr().add(i));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i), _mm256_mul_ps(vl, vr));
+                   i += 8;
+               }
+               for j in i..l_chunk.len() {
+                   l_chunk[j] *= r_chunk[j];
+               }
+           });
+    }
+
+    #[inline]
+    pub unsafe fn simd_sub_slice(lhs: &mut [f32], rhs: &[f32]) {
+        use rayon::prelude::*;
+        lhs.par_chunks_mut(2048)
+           .zip(rhs.par_chunks(2048))
+           .for_each(|(l_chunk, r_chunk)| unsafe {
+               let mut i = 0;
+               while i + 32 <= l_chunk.len() {
+                   let vl0 = _mm256_loadu_ps(l_chunk.as_ptr().add(i));
+                   let vr0 = _mm256_loadu_ps(r_chunk.as_ptr().add(i));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i), _mm256_sub_ps(vl0, vr0));
+
+                   let vl1 = _mm256_loadu_ps(l_chunk.as_ptr().add(i + 8));
+                   let vr1 = _mm256_loadu_ps(r_chunk.as_ptr().add(i + 8));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i + 8), _mm256_sub_ps(vl1, vr1));
+
+                   let vl2 = _mm256_loadu_ps(l_chunk.as_ptr().add(i + 16));
+                   let vr2 = _mm256_loadu_ps(r_chunk.as_ptr().add(i + 16));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i + 16), _mm256_sub_ps(vl2, vr2));
+
+                   let vl3 = _mm256_loadu_ps(l_chunk.as_ptr().add(i + 24));
+                   let vr3 = _mm256_loadu_ps(r_chunk.as_ptr().add(i + 24));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i + 24), _mm256_sub_ps(vl3, vr3));
+
+                   i += 32;
+               }
+               while i + 8 <= l_chunk.len() {
+                   let vl = _mm256_loadu_ps(l_chunk.as_ptr().add(i));
+                   let vr = _mm256_loadu_ps(r_chunk.as_ptr().add(i));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i), _mm256_sub_ps(vl, vr));
+                   i += 8;
+               }
+               for j in i..l_chunk.len() {
+                   l_chunk[j] -= r_chunk[j];
+               }
+           });
+    }
+
+    #[inline]
+    pub unsafe fn simd_div_slice(lhs: &mut [f32], rhs: &[f32]) {
+        use rayon::prelude::*;
+        lhs.par_chunks_mut(2048)
+           .zip(rhs.par_chunks(2048))
+           .for_each(|(l_chunk, r_chunk)| unsafe {
+               let mut i = 0;
+               while i + 32 <= l_chunk.len() {
+                   let vl0 = _mm256_loadu_ps(l_chunk.as_ptr().add(i));
+                   let vr0 = _mm256_loadu_ps(r_chunk.as_ptr().add(i));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i), _mm256_div_ps(vl0, vr0));
+
+                   let vl1 = _mm256_loadu_ps(l_chunk.as_ptr().add(i + 8));
+                   let vr1 = _mm256_loadu_ps(r_chunk.as_ptr().add(i + 8));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i + 8), _mm256_div_ps(vl1, vr1));
+
+                   let vl2 = _mm256_loadu_ps(l_chunk.as_ptr().add(i + 16));
+                   let vr2 = _mm256_loadu_ps(r_chunk.as_ptr().add(i + 16));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i + 16), _mm256_div_ps(vl2, vr2));
+
+                   let vl3 = _mm256_loadu_ps(l_chunk.as_ptr().add(i + 24));
+                   let vr3 = _mm256_loadu_ps(r_chunk.as_ptr().add(i + 24));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i + 24), _mm256_div_ps(vl3, vr3));
+
+                   i += 32;
+               }
+               while i + 8 <= l_chunk.len() {
+                   let vl = _mm256_loadu_ps(l_chunk.as_ptr().add(i));
+                   let vr = _mm256_loadu_ps(r_chunk.as_ptr().add(i));
+                   _mm256_storeu_ps(l_chunk.as_mut_ptr().add(i), _mm256_div_ps(vl, vr));
+                   i += 8;
+               }
+               for j in i..l_chunk.len() {
+                   l_chunk[j] /= r_chunk[j];
+               }
+           });
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -334,6 +486,94 @@ mod neon_impl {
         }
         for j in i..data.len() { if data[j] < 0.0 { data[j] = 0.0; } }
     }
+
+    #[inline]
+    pub unsafe fn simd_add_slice(lhs: &mut [f32], rhs: &[f32]) {
+        use rayon::prelude::*;
+        lhs.par_chunks_mut(2048)
+           .zip(rhs.par_chunks(2048))
+           .for_each(|(l_chunk, r_chunk)| unsafe {
+               let mut i = 0;
+               while i + 16 <= l_chunk.len() {
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i), vaddq_f32(vld1q_f32(l_chunk.as_ptr().add(i)), vld1q_f32(r_chunk.as_ptr().add(i))));
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i + 4), vaddq_f32(vld1q_f32(l_chunk.as_ptr().add(i + 4)), vld1q_f32(r_chunk.as_ptr().add(i + 4))));
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i + 8), vaddq_f32(vld1q_f32(l_chunk.as_ptr().add(i + 8)), vld1q_f32(r_chunk.as_ptr().add(i + 8))));
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i + 12), vaddq_f32(vld1q_f32(l_chunk.as_ptr().add(i + 12)), vld1q_f32(r_chunk.as_ptr().add(i + 12))));
+                   i += 16;
+               }
+               while i + 4 <= l_chunk.len() {
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i), vaddq_f32(vld1q_f32(l_chunk.as_ptr().add(i)), vld1q_f32(r_chunk.as_ptr().add(i))));
+                   i += 4;
+               }
+               for j in i..l_chunk.len() { l_chunk[j] += r_chunk[j]; }
+           });
+    }
+
+    #[inline]
+    pub unsafe fn simd_mul_slice(lhs: &mut [f32], rhs: &[f32]) {
+        use rayon::prelude::*;
+        lhs.par_chunks_mut(2048)
+           .zip(rhs.par_chunks(2048))
+           .for_each(|(l_chunk, r_chunk)| unsafe {
+               let mut i = 0;
+               while i + 16 <= l_chunk.len() {
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i), vmulq_f32(vld1q_f32(l_chunk.as_ptr().add(i)), vld1q_f32(r_chunk.as_ptr().add(i))));
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i + 4), vmulq_f32(vld1q_f32(l_chunk.as_ptr().add(i + 4)), vld1q_f32(r_chunk.as_ptr().add(i + 4))));
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i + 8), vmulq_f32(vld1q_f32(l_chunk.as_ptr().add(i + 8)), vld1q_f32(r_chunk.as_ptr().add(i + 8))));
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i + 12), vmulq_f32(vld1q_f32(l_chunk.as_ptr().add(i + 12)), vld1q_f32(r_chunk.as_ptr().add(i + 12))));
+                   i += 16;
+               }
+               while i + 4 <= l_chunk.len() {
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i), vmulq_f32(vld1q_f32(l_chunk.as_ptr().add(i)), vld1q_f32(r_chunk.as_ptr().add(i))));
+                   i += 4;
+               }
+               for j in i..l_chunk.len() { l_chunk[j] *= r_chunk[j]; }
+           });
+    }
+
+    #[inline]
+    pub unsafe fn simd_sub_slice(lhs: &mut [f32], rhs: &[f32]) {
+        use rayon::prelude::*;
+        lhs.par_chunks_mut(2048)
+           .zip(rhs.par_chunks(2048))
+           .for_each(|(l_chunk, r_chunk)| unsafe {
+               let mut i = 0;
+               while i + 16 <= l_chunk.len() {
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i), vsubq_f32(vld1q_f32(l_chunk.as_ptr().add(i)), vld1q_f32(r_chunk.as_ptr().add(i))));
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i + 4), vsubq_f32(vld1q_f32(l_chunk.as_ptr().add(i + 4)), vld1q_f32(r_chunk.as_ptr().add(i + 4))));
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i + 8), vsubq_f32(vld1q_f32(l_chunk.as_ptr().add(i + 8)), vld1q_f32(r_chunk.as_ptr().add(i + 8))));
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i + 12), vsubq_f32(vld1q_f32(l_chunk.as_ptr().add(i + 12)), vld1q_f32(r_chunk.as_ptr().add(i + 12))));
+                   i += 16;
+               }
+               while i + 4 <= l_chunk.len() {
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i), vsubq_f32(vld1q_f32(l_chunk.as_ptr().add(i)), vld1q_f32(r_chunk.as_ptr().add(i))));
+                   i += 4;
+                }
+               for j in i..l_chunk.len() { l_chunk[j] -= r_chunk[j]; }
+           });
+    }
+
+    #[inline]
+    pub unsafe fn simd_div_slice(lhs: &mut [f32], rhs: &[f32]) {
+        use rayon::prelude::*;
+        lhs.par_chunks_mut(2048)
+           .zip(rhs.par_chunks(2048))
+           .for_each(|(l_chunk, r_chunk)| unsafe {
+               let mut i = 0;
+               while i + 16 <= l_chunk.len() {
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i), vdivq_f32(vld1q_f32(l_chunk.as_ptr().add(i)), vld1q_f32(r_chunk.as_ptr().add(i))));
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i + 4), vdivq_f32(vld1q_f32(l_chunk.as_ptr().add(i + 4)), vld1q_f32(r_chunk.as_ptr().add(i + 4))));
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i + 8), vdivq_f32(vld1q_f32(l_chunk.as_ptr().add(i + 8)), vld1q_f32(r_chunk.as_ptr().add(i + 8))));
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i + 12), vdivq_f32(vld1q_f32(l_chunk.as_ptr().add(i + 12)), vld1q_f32(r_chunk.as_ptr().add(i + 12))));
+                   i += 16;
+               }
+               while i + 4 <= l_chunk.len() {
+                   vst1q_f32(l_chunk.as_mut_ptr().add(i), vdivq_f32(vld1q_f32(l_chunk.as_ptr().add(i)), vld1q_f32(r_chunk.as_ptr().add(i))));
+                   i += 4;
+               }
+               for j in i..l_chunk.len() { l_chunk[j] /= r_chunk[j]; }
+           });
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -370,5 +610,33 @@ mod scalar_impl {
     }
     #[inline] pub fn simd_relu_slice(data: &mut [f32]) {
         for x in data.iter_mut() { if *x < 0.0 { *x = 0.0; } }
+    }
+    #[inline]
+    pub fn simd_add_slice(lhs: &mut [f32], rhs: &[f32]) {
+        use rayon::prelude::*;
+        lhs.par_iter_mut().zip(rhs.par_iter()).for_each(|(l, r)| {
+            *l += r;
+        });
+    }
+    #[inline]
+    pub fn simd_mul_slice(lhs: &mut [f32], rhs: &[f32]) {
+        use rayon::prelude::*;
+        lhs.par_iter_mut().zip(rhs.par_iter()).for_each(|(l, r)| {
+            *l *= r;
+        });
+    }
+    #[inline]
+    pub fn simd_sub_slice(lhs: &mut [f32], rhs: &[f32]) {
+        use rayon::prelude::*;
+        lhs.par_iter_mut().zip(rhs.par_iter()).for_each(|(l, r)| {
+            *l -= r;
+        });
+    }
+    #[inline]
+    pub fn simd_div_slice(lhs: &mut [f32], rhs: &[f32]) {
+        use rayon::prelude::*;
+        lhs.par_iter_mut().zip(rhs.par_iter()).for_each(|(l, r)| {
+            *l /= r;
+        });
     }
 }

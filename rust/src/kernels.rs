@@ -204,20 +204,42 @@ pub fn fast_mean_all(data: &[f32]) -> f32 {
 }
 
 pub fn fast_norm_l2(data: &[f32]) -> f32 {
-    let sq_sum: f32 = data.par_chunks(2048).map(|chunk| {
-        chunk.iter().map(|&x| x * x).sum::<f32>()
-    }).sum();
-    sq_sum.sqrt()
+    const PAR_THRESH: usize = 512 * 1024;
+    if data.len() <= PAR_THRESH {
+        let mut sum = 0.0f32;
+        for &x in data {
+            sum += x * x;
+        }
+        sum.sqrt()
+    } else {
+        let sq_sum: f32 = data.par_chunks(65536).map(|chunk| {
+            chunk.iter().map(|&x| x * x).sum::<f32>()
+        }).sum();
+        sq_sum.sqrt()
+    }
 }
 
 pub fn fast_std_all(data: &[f32], ddof: usize) -> f32 {
     let n = data.len();
     if n <= ddof { return 0.0; }
     let mean = fast_mean_all(data);
-    let sq_sum: f32 = data.par_chunks(2048)
-        .map(|chunk| chunk.iter().map(|&x| (x - mean) * (x - mean)).sum::<f32>())
-        .sum();
-    (sq_sum / (n - ddof) as f32).sqrt()
+    const PAR_THRESH: usize = 512 * 1024;
+    if n <= PAR_THRESH {
+        let mut sq_sum = 0.0f32;
+        for &x in data {
+            let diff = x - mean;
+            sq_sum += diff * diff;
+        }
+        (sq_sum / (n - ddof) as f32).sqrt()
+    } else {
+        let sq_sum: f32 = data.par_chunks(65536)
+            .map(|chunk| chunk.iter().map(|&x| {
+                let d = x - mean;
+                d * d
+            }).sum::<f32>())
+            .sum();
+        (sq_sum / (n - ddof) as f32).sqrt()
+    }
 }
 
 /// Fused cross-entropy: log_softmax then pick target index.

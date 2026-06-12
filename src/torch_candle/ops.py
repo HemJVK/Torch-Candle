@@ -320,10 +320,11 @@ def prod(input, dim=None, keepdim=False, dtype=None, out=None):
 
 
 def std(input, dim=None, correction=1, keepdim=False, out=None):
-    """Variance via candle: E[x^2] - E[x]^2, then sqrt."""
     t    = _wrap(input)
     ddof = correction
     if dim is None:
+        if not t.requires_grad:
+            return Tensor(t._tensor.std_all(ddof))
         # scalar variance — candle mean_all
         mu   = Tensor(t._tensor.mean_all())
         diff = t - mu
@@ -335,10 +336,11 @@ def std(input, dim=None, correction=1, keepdim=False, out=None):
 
 
 def var(input, dim=None, correction=1, keepdim=False, out=None):
-    """Variance via candle arithmetic."""
     t    = _wrap(input)
     ddof = correction
     if dim is None:
+        if not t.requires_grad:
+            return Tensor(t._tensor.var_all(ddof))
         mu      = Tensor(t._tensor.mean_all())
         diff    = t - mu
         n       = t.numel()
@@ -349,21 +351,14 @@ def var(input, dim=None, correction=1, keepdim=False, out=None):
 def max(input, dim=None, keepdim=False, out=None):
     t = _wrap(input)
     if dim is None:
-        # cascade max_keepdim over all dims
-        res = t._tensor
-        for d in range(len(t.shape) - 1, -1, -1):
-            res = res.max_keepdim(d)
-        return Tensor(res)
+        return Tensor(t._tensor.max_all())
     raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of dim-wise max is required.")
 
 
 def min(input, dim=None, keepdim=False, out=None):
     t = _wrap(input)
     if dim is None:
-        res = t._tensor
-        for d in range(len(t.shape) - 1, -1, -1):
-            res = res.min_keepdim(d)
-        return Tensor(res)
+        return Tensor(t._tensor.min_all())
     raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of dim-wise min is required.")
 
 
@@ -395,6 +390,8 @@ def norm(input, p=2, dim=None, keepdim=False, dtype=None, out=None):
         s  = sq.sum(dim=dim, keepdim=keepdim)
         return s.sqrt()
     if p == 2 and dim is None:
+        if not t.requires_grad:
+            return Tensor(t._tensor.norm_l2_all())
         sq = t * t
         return sq.sum().sqrt()
     raise RuntimeError("Zero-Fallback Mandate Violation: Native implementation of non-p=2 norm is required.")
