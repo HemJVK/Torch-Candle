@@ -140,18 +140,18 @@ def test_spsc_shared_memory_direct_serialization():
     # Pop the contiguous C-compatible structures directly from shared memory
     mv = memoryview(ring_buf)
     head = struct.unpack_from("Q", mv, 0)[0]
-    tail = struct.unpack_from("Q", mv, 136)[0]
+    tail = struct.unpack_from("Q", mv, 128)[0]
     
     assert tail != head
     
     index = tail % 1024
-    task_offset = 144 + index * 4752
+    task_offset = 65856 + index * 4752
     
     op_code = struct.unpack_from("I", mv, task_offset + 0)[0]
     device_id = struct.unpack_from("Q", mv, task_offset + 8)[0]
     payload = bytes(mv[task_offset + 16 : task_offset + 16 + 256])
     
-    struct.pack_into("Q", mv, 136, tail + 1)
+    struct.pack_into("Q", mv, 128, tail + 1)
     
     assert op_code == 777
     assert device_id == 0

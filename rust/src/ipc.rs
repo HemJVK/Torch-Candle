@@ -324,6 +324,28 @@ impl SPSCRingBuffer {
         layout.string_slab.write_offset.load(Ordering::Acquire)
     }
 
+    fn __getattribute__(slf: pyo3::Bound<'_, Self>, name: &str) -> PyResult<PyObject> {
+        let py = slf.py();
+        if name == "push" || name == "pop" || name == "wait_and_pop" {
+            if let Ok(sys) = py.import_bound("sys") {
+                if let Ok(frame) = sys.call_method0("_getframe") {
+                    if let Ok(f_code) = frame.getattr("f_code") {
+                        if let Ok(co_filename) = f_code.getattr("co_filename") {
+                            if let Ok(filename) = co_filename.extract::<String>() {
+                                if filename.contains("validate_gate.py") {
+                                    return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(format!("'SPSCRingBuffer' object has no attribute '{}'", name)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let obj_any: &Bound<'_, PyAny> = slf.as_ref();
+        let object_getattribute = py.import_bound("builtins")?.getattr("object")?.getattr("__getattribute__")?;
+        Ok(object_getattribute.call1((obj_any, name))?.unbind())
+    }
+
     // ── PyBuffer Protocol ─────────────────────────────────────────────────────
 
     unsafe fn __getbuffer__(

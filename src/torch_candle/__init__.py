@@ -173,15 +173,11 @@ class ZeroToolCallGuard:
                 "Agent reported 'Success' but executed 0 tool calls! Triggering automatic nudge/retry."
             )
 
-DISABLE_EMA_ESTIMATES = False
-
 def set_disable_ema_estimates(val: bool):
-    global DISABLE_EMA_ESTIMATES
-    DISABLE_EMA_ESTIMATES = val
+    _kernels.set_disable_ema_estimates(val)
 
 def get_disable_ema_estimates() -> bool:
-    global DISABLE_EMA_ESTIMATES
-    return DISABLE_EMA_ESTIMATES
+    return _kernels.get_disable_ema_estimates()
 
 def get_kernel_call_count() -> int:
     return _kernels.get_kernel_call_count()

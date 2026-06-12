@@ -10,15 +10,29 @@ def _raw(t):
     """Return the underlying PyTensor from a Tensor wrapper."""
     return t._tensor if hasattr(t, '_tensor') else t
 
-class Tensor:
+class TensorMeta(type):
+    @property
+    def enable_sha(cls):
+        return _kernels.get_enable_sha()
+
+    @enable_sha.setter
+    def enable_sha(cls, val):
+        _kernels.set_enable_sha(val)
+
+    @property
+    def _grad_history(cls):
+        class GradHistoryProxy:
+            def clear(self):
+                _kernels.clear_grad_history()
+        return GradHistoryProxy()
+
+class Tensor(metaclass=TensorMeta):
     """torch_candle.Tensor — thin wrapper around candle.Tensor (Rust via PyO3).
     """
 
     __slots__ = ['_tensor', '_device', '_dtype', '_shape', '_id', '_shm', '_grad_history_list']
 
     _grad_enabled = True  # toggled by torch.no_grad()
-    enable_sha = False
-    _grad_history = {}
 
     def __hash__(self):
         return id(self._tensor)

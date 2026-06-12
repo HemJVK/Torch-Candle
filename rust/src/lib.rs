@@ -90,6 +90,14 @@ fn sha_ema_beta() -> f32 {
     f32::from_bits(SHA_EMA_BETA.load(AtomicOrdering::Relaxed))
 }
 
+static ENABLE_SHA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static DISABLE_EMA_ESTIMATES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static GRAD_HISTORY: OnceLock<Mutex<HashMap<usize, (Vec<usize>, Vec<f32>)>>> = OnceLock::new();
+
+fn get_grad_history_map() -> &'static Mutex<HashMap<usize, (Vec<usize>, Vec<f32>)>> {
+    GRAD_HISTORY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // §4 SHA Fixer Agent — Bypassed Node Registry
 //
@@ -333,86 +341,16 @@ where
     Ok(())
 }
 
-fn get_python_grad_history(py: Python<'_>, param_id: usize) -> Option<(Vec<usize>, Vec<f32>)> {
-    if let Ok(tensor_mod) = py.import_bound("torch_candle") {
-        if let Ok(tensor_cls) = tensor_mod.getattr("Tensor") {
-            if let Ok(grad_history) = tensor_cls.getattr("_grad_history") {
-                if let Ok(item) = grad_history.get_item(param_id) {
-                    // 1. Try PyTuple (shape, data)
-                    if let Ok(tuple) = item.downcast::<pyo3::types::PyTuple>() {
-                        if tuple.len() >= 2 {
-                            let shape_val: Vec<usize> = tuple.get_item(0).unwrap().extract().unwrap_or_default();
-                            let data_val = tuple.get_item(1).unwrap();
-                            if let Ok(arr) = data_val.extract::<Vec<f32>>() {
-                                return Some((shape_val, arr));
-                            } else if let Ok(arr) = data_val.call_method0("tolist") {
-                                if let Ok(vec) = arr.extract::<Vec<f32>>() {
-                                    return Some((shape_val, vec));
-                                }
-                            }
-                        }
-                    }
-                    // 2. Try PyDict (Heterogeneous dict metadata)
-                    if let Ok(dict) = item.downcast::<pyo3::types::PyDict>() {
-                        let shape_opt = dict.get_item("shape").ok().flatten().and_then(|x| x.extract::<Vec<usize>>().ok());
-                        let data_opt = dict.get_item("data").ok().flatten();
-                        if let (Some(shape_val), Some(data_val)) = (shape_opt, data_opt) {
-                            if let Ok(arr) = data_val.extract::<Vec<f32>>() {
-                                return Some((shape_val, arr));
-                            } else if let Ok(arr) = data_val.call_method0("tolist") {
-                                if let Ok(vec) = arr.extract::<Vec<f32>>() {
-                                    return Some((shape_val, vec));
-                                }
-                            }
-                        }
-                    }
-                    // 3. Try PyString (Heterogeneous JSON)
-                    if let Ok(s) = item.extract::<String>() {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-                            let shape_val: Vec<usize> = v.get("shape")
-                                .and_then(|x| x.as_array())
-                                .map(|arr| arr.iter().filter_map(|x| x.as_u64().map(|y| y as usize)).collect())
-                                .unwrap_or_default();
-                            let data_val: Vec<f32> = v.get("data")
-                                .and_then(|x| x.as_array())
-                                .map(|arr| arr.iter().filter_map(|x| x.as_f64().map(|y| y as f32)).collect())
-                                .unwrap_or_default();
-                            if !data_val.is_empty() {
-                                return Some((shape_val, data_val));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
+fn get_python_grad_history(param_id: usize) -> Option<(Vec<usize>, Vec<f32>)> {
+    get_grad_history_map().lock().get(&param_id).cloned()
 }
 
-fn get_python_enable_sha(py: Python<'_>) -> bool {
-    if let Ok(tensor_mod) = py.import_bound("torch_candle") {
-        if let Ok(tensor_cls) = tensor_mod.getattr("Tensor") {
-            if let Ok(enable_sha) = tensor_cls.getattr("enable_sha") {
-                if let Ok(val) = enable_sha.extract::<bool>() {
-                    return val;
-                }
-            }
-        }
-    }
-    true
+fn get_enable_sha() -> bool {
+    ENABLE_SHA.load(AtomicOrdering::Acquire)
 }
 
-fn get_disable_ema_estimates(py: Python<'_>) -> bool {
-    if let Ok(tensor_mod) = py.import_bound("torch_candle") {
-        if let Ok(fn_val) = tensor_mod.getattr("get_disable_ema_estimates") {
-            if let Ok(res) = fn_val.call0() {
-                if let Ok(val) = res.extract::<bool>() {
-                    return val;
-                }
-            }
-        }
-    }
-    false
+fn get_disable_ema_estimates() -> bool {
+    DISABLE_EMA_ESTIMATES.load(AtomicOrdering::Acquire)
 }
 
 fn has_nan_or_inf(t: &Tensor) -> bool {
@@ -426,20 +364,22 @@ fn has_nan_or_inf(t: &Tensor) -> bool {
     false
 }
 
-fn save_python_grad_history(py: Python<'_>, param_id: usize, shape: Vec<usize>, data: Vec<f32>) {
-    if let Ok(tensor_mod) = py.import_bound("torch_candle") {
-        if let Ok(tensor_cls) = tensor_mod.getattr("Tensor") {
-            if let Ok(grad_history) = tensor_cls.getattr("_grad_history") {
-                let tuple = (shape, data);
-                let _ = grad_history.set_item(param_id, tuple);
-            }
-        }
-    }
+fn save_python_grad_history(param_id: usize, shape: Vec<usize>, data: Vec<f32>) {
+    get_grad_history_map().lock().insert(param_id, (shape, data));
 }
 
-fn heal_gradient(py: Python<'_>, tensor_id: usize, new_grad: &Tensor) -> PyResult<Tensor> {
-    if !get_python_enable_sha(py) || get_disable_ema_estimates(py) {
+fn heal_gradient(tensor_id: usize, actual_gid: Option<usize>, new_grad: &Tensor, is_manual: bool) -> PyResult<Tensor> {
+    if !get_enable_sha() || get_disable_ema_estimates() {
         return Ok(new_grad.clone());
+    }
+
+    let has_history = get_python_grad_history(tensor_id).is_some();
+    if is_manual && has_nan_or_inf(new_grad) && !has_history {
+        if let Some(gid) = actual_gid {
+            if tensor_id == gid {
+                return Ok(new_grad.clone());
+            }
+        }
     }
 
     // Read EMA beta from the atomic global — configurable via set_sha_beta()
@@ -450,21 +390,21 @@ fn heal_gradient(py: Python<'_>, tensor_id: usize, new_grad: &Tensor) -> PyResul
         // Clean gradient: update EMA history with g_t = β·g_{t-1} + (1-β)·g_curr
         if let Ok(vec) = new_grad.flatten_all().and_then(|x| x.to_vec1::<f32>()) {
             let shape = new_grad.dims().to_vec();
-            if let Some((_, old_hist)) = get_python_grad_history(py, tensor_id) {
+            if let Some((_, old_hist)) = get_python_grad_history(tensor_id) {
                 let mut new_hist = old_hist;
                 for i in 0..new_hist.len().min(vec.len()) {
                     new_hist[i] = beta * new_hist[i] + one_minus_beta * vec[i];
                 }
-                save_python_grad_history(py, tensor_id, shape, new_hist);
+                save_python_grad_history(tensor_id, shape, new_hist);
             } else {
-                save_python_grad_history(py, tensor_id, shape, vec);
+                save_python_grad_history(tensor_id, shape, vec);
             }
         }
         return Ok(new_grad.clone());
     }
 
     // Anomalous gradient detected — attempt surgical element-level replacement
-    if let Some((shape, history)) = get_python_grad_history(py, tensor_id) {
+    if let Some((shape, history)) = get_python_grad_history(tensor_id) {
         if let Ok(mut vec) = new_grad.flatten_all().and_then(|x| x.to_vec1::<f32>()) {
             let mut healed = false;
             for i in 0..vec.len().min(history.len()) {
@@ -1497,8 +1437,8 @@ impl PyTensor {
     }
 
     #[getter]
-    fn grad(&self, py: Python<'_>) -> PyResult<Option<PyTensor>> {
-        self.retrieve_grad(py, None)
+    fn grad(&self) -> PyResult<Option<PyTensor>> {
+        self.retrieve_grad(None)
     }
 
     fn get_raw_grad(&self) -> PyResult<Option<PyTensor>> {
@@ -1518,12 +1458,12 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (py_param_id=None))]
-    fn retrieve_grad(&self, py: Python<'_>, py_param_id: Option<usize>) -> PyResult<Option<PyTensor>> {
+    fn retrieve_grad(&self, py_param_id: Option<usize>) -> PyResult<Option<PyTensor>> {
         if let Some(ref g_mutex) = self.grad {
             let g_opt = g_mutex.lock();
             if let Some(ref g) = *g_opt {
                 // Fast path: skip SHA healing when disabled (default)
-                if !get_python_enable_sha(py) {
+                if !get_enable_sha() {
                     return Ok(Some(PyTensor {
                         inner: g.clone(),
                         grad: None,
@@ -1534,9 +1474,10 @@ impl PyTensor {
                 }
                 drop(g_opt);
                 let param_id = py_param_id.unwrap_or_else(|| Arc::as_ptr(g_mutex) as usize);
+                let gid = Arc::as_ptr(g_mutex) as usize;
                 let mut g_opt2 = g_mutex.lock();
                 if let Some(ref g2) = *g_opt2 {
-                    let healed = heal_gradient(py, param_id, g2)?;
+                    let healed = heal_gradient(param_id, Some(gid), g2, true)?;
                     *g_opt2 = Some(healed.clone());
                     return Ok(Some(PyTensor { inner: healed, grad: None, grad_fn: None, requires_grad: false, parents: Vec::new() }));
                 }
@@ -1546,12 +1487,12 @@ impl PyTensor {
     }
 
     #[setter]
-    fn set_grad(&self, py: Python<'_>, new_grad: Option<PyTensor>) -> PyResult<()> {
+    fn set_grad(&self, new_grad: Option<PyTensor>) -> PyResult<()> {
         if let Some(ref g_mutex) = self.grad {
             let param_id = Arc::as_ptr(g_mutex) as usize;
             let mut g_opt = g_mutex.lock();
             if let Some(ref t) = new_grad {
-                let healed = heal_gradient(py, param_id, &t.inner)?;
+                let healed = heal_gradient(param_id, Some(param_id), &t.inner, true)?;
                 *g_opt = Some(healed);
             } else {
                 *g_opt = None;
@@ -1567,11 +1508,12 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (new_grad, param_id))]
-    fn set_grad_with_id(&self, py: Python<'_>, new_grad: Option<PyTensor>, param_id: usize) -> PyResult<()> {
+    fn set_grad_with_id(&self, new_grad: Option<PyTensor>, param_id: usize) -> PyResult<()> {
         if let Some(ref g_mutex) = self.grad {
+            let gid = Arc::as_ptr(g_mutex) as usize;
             let mut g_opt = g_mutex.lock();
             if let Some(ref t) = new_grad {
-                let healed = heal_gradient(py, param_id, &t.inner)?;
+                let healed = heal_gradient(param_id, Some(gid), &t.inner, true)?;
                 *g_opt = Some(healed);
             } else {
                 *g_opt = None;
@@ -1934,7 +1876,7 @@ impl PyTensor {
             } else {
                 grad_val.clone()
             };
-            *g_opt = Some(heal_gradient(py, param_id, &accumulated)?);
+            *g_opt = Some(heal_gradient(param_id, Some(param_id), &accumulated, false)?);
         }
 
         // --- Topological Engine ---
@@ -1981,7 +1923,7 @@ impl PyTensor {
                             } else {
                                 p_grad
                             };
-                            *pg_opt = Some(heal_gradient(py, param_id, &accumulated)?);
+                            *pg_opt = Some(heal_gradient(param_id, Some(param_id), &accumulated, false)?);
                         }
                     }
                 }
@@ -2523,16 +2465,20 @@ impl<F: Fn(&mut [f32]) + Send + Sync> InplaceOp1 for SimdUnaryOp<F> {
 /// We clone the tensor first so autograd graph is not mutated.
 fn apply_simd_unary<F: Fn(&mut [f32]) + Send + Sync + 'static>(
     t: &Tensor,
-    name: &'static str,
+    _name: &'static str,
     kernel: F,
 ) -> PyResult<Tensor> {
     if !matches!(t.device(), Device::Cpu) {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("apply_simd_unary: CPU only"));
     }
-    // Clone the tensor (cheap Arc clone of the storage Arc + new layout)
-    let out = t.clone();
-    let op = SimdUnaryOp { name, func: kernel };
-    out.inplace_op1(&op)
+    let mut data = t.flatten_all()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        .to_vec1::<f32>()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+    
+    kernel(&mut data);
+    
+    let out = Tensor::from_slice(&data, t.shape(), t.device())
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
     Ok(out)
 }
@@ -2818,15 +2764,31 @@ fn vectorized_forward(
 }
 
 #[pyfunction]
-fn set_enable_sha(_val: bool) {}
-
-#[pyfunction]
-fn get_enable_sha() -> bool {
-    false
+fn set_enable_sha(val: bool) {
+    ENABLE_SHA.store(val, std::sync::atomic::Ordering::Release);
 }
 
 #[pyfunction]
-fn clear_grad_history() {}
+#[pyo3(name = "get_enable_sha")]
+fn py_get_enable_sha() -> bool {
+    get_enable_sha()
+}
+
+#[pyfunction]
+fn set_disable_ema_estimates(val: bool) {
+    DISABLE_EMA_ESTIMATES.store(val, std::sync::atomic::Ordering::Release);
+}
+
+#[pyfunction]
+#[pyo3(name = "get_disable_ema_estimates")]
+fn py_get_disable_ema_estimates() -> bool {
+    get_disable_ema_estimates()
+}
+
+#[pyfunction]
+fn clear_grad_history() {
+    get_grad_history_map().lock().clear();
+}
 
 
 
@@ -3099,7 +3061,9 @@ fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(native_cross_entropy, m)?)?;
     m.add_function(wrap_pyfunction!(vectorized_forward, m)?)?;
     m.add_function(wrap_pyfunction!(set_enable_sha, m)?)?;
-    m.add_function(wrap_pyfunction!(get_enable_sha, m)?)?;
+    m.add_function(wrap_pyfunction!(py_get_enable_sha, m)?)?;
+    m.add_function(wrap_pyfunction!(set_disable_ema_estimates, m)?)?;
+    m.add_function(wrap_pyfunction!(py_get_disable_ema_estimates, m)?)?;
     m.add_function(wrap_pyfunction!(clear_grad_history, m)?)?;
     m.add_function(wrap_pyfunction!(clear_ad_registry, m)?)?;
     m.add_function(wrap_pyfunction!(jit::compile_ast, m)?)?;

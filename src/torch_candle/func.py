@@ -232,25 +232,44 @@ def vmap(func, in_dims=0, out_dims=0):
 def grad(func, argnums=0):
     """Returns a function that computes the gradient of `func` with respect to `argnums` argument."""
     def wrapped(*args, **kwargs):
-        _kernels.enter_ad_level()
-        try:
+        import torch_candle_backend as _kernels
+        if _kernels.get_active_ad_level() > 0:
+            _kernels.enter_ad_level()
+            try:
+                x = args[argnums]
+                diff = Tensor([1.0], device=x.device)
+                x_grad = Tensor(x._tensor.to_grad_tensor(diff._tensor))
+                
+                new_args = list(args)
+                new_args[argnums] = x_grad
+                
+                out = func(*new_args, **kwargs)
+                
+                # Unwrap out if it's a subclass to get the underlying tensor for ad_diff extraction
+                out_tensor = out
+                while hasattr(out_tensor, "inner_tensor"):
+                    out_tensor = out_tensor.inner_tensor
+                    
+                if hasattr(out_tensor, "_tensor") and out_tensor._tensor.ad_diff is not None:
+                    res = Tensor(out_tensor._tensor.ad_diff)
+                else:
+                    res = Tensor([0.0], device=x.device)
+            finally:
+                _kernels.exit_ad_level()
+                
+            return res
+        else:
             x = args[argnums]
-            diff = Tensor([1.0], device=x.device)
-            x_grad = Tensor(x._tensor.to_grad_tensor(diff._tensor))
-            
+            x_copy = x.clone().detach()
+            x_copy.requires_grad = True
             new_args = list(args)
-            new_args[argnums] = x_grad
+            new_args[argnums] = x_copy
             
             out = func(*new_args, **kwargs)
+            out.backward()
             
-            # Unwrap out if it's a subclass to get the underlying tensor for ad_diff extraction
-            out_tensor = out
-            while hasattr(out_tensor, "inner_tensor"):
-                out_tensor = out_tensor.inner_tensor
-                
-            if hasattr(out_tensor, "_tensor") and out_tensor._tensor.ad_diff is not None:
-                res = Tensor(out_tensor._tensor.ad_diff)
-            else:
+            res = x_copy.grad
+            if res is None:
                 res = Tensor([0.0], device=x.device)
                 
             # Self-healing Autograd EMA logic
@@ -261,25 +280,23 @@ def grad(func, argnums=0):
             res_np = res.numpy()
             has_anomaly = np.isnan(res_np).any() or np.isinf(res_np).any()
             
-            if not hasattr(x_grad, "_grad_history_list") or getattr(x_grad, "_grad_history_list", None) is None:
-                x_grad._grad_history_list = []
+            if not hasattr(x, "_grad_history_list") or getattr(x, "_grad_history_list", None) is None:
+                x._grad_history_list = []
                 
             if getattr(Tensor, "enable_sha", True) and not disable_ema:
                 if has_anomaly:
-                    if x_grad._grad_history_list:
+                    if x._grad_history_list:
                         # Read beta from Rust backend — configured via set_sha_beta()
                         beta = _kernels.get_sha_beta()
-                        g_prev = x_grad._grad_history_list[-1]
+                        g_prev = x._grad_history_list[-1]
                         res = g_prev * beta
-                        x_grad._grad_history_list.append(res)
+                        x._grad_history_list.append(res)
                 else:
-                    x_grad._grad_history_list.append(res)
+                    x._grad_history_list.append(res)
             elif not has_anomaly:
-                x_grad._grad_history_list.append(res)
-        finally:
-            _kernels.exit_ad_level()
-            
-        return res
+                x._grad_history_list.append(res)
+                
+            return res
     return wrapped
 
 
@@ -471,7 +488,8 @@ def jacrev(func, argnums=0):
         _kernels.enter_ad_level()
         try:
             x = args[argnums]
-            diff = Tensor([1.0], device=x.device)
+            from torch_candle import ones
+            diff = ones(*x.shape, device=x.device)
             x_grad = Tensor(x._tensor.to_grad_tensor(diff._tensor))
             
             new_args = list(args)

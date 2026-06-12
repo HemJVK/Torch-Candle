@@ -144,7 +144,7 @@ def test_spsc_ring_buffer():
         start_time = time.time()
         while True:
             head = struct.unpack_from("Q", mv, 0)[0]
-            tail = struct.unpack_from("Q", mv, 136)[0]
+            tail = struct.unpack_from("Q", mv, 128)[0]
             if tail != head:
                 break
             if time.time() - start_time > 2.0:
@@ -152,25 +152,25 @@ def test_spsc_ring_buffer():
             time.sleep(0.001)
             
         index = tail % 1024
-        task_offset = 144 + index * 4752
+        task_offset = 65856 + index * 4752
         
         op_code = struct.unpack_from("I", mv, task_offset + 0)[0]
         device_id = struct.unpack_from("Q", mv, task_offset + 8)[0]
         payload = bytes(mv[task_offset + 16 : task_offset + 16 + 256])
         
-        struct.pack_into("Q", mv, 136, tail + 1)
+        struct.pack_into("Q", mv, 128, tail + 1)
         return op_code, device_id, payload
 
     def py_push(buffer_obj, op_code, device_id, payload_bytes):
         mv = memoryview(buffer_obj)
         head = struct.unpack_from("Q", mv, 0)[0]
-        tail = struct.unpack_from("Q", mv, 136)[0]
+        tail = struct.unpack_from("Q", mv, 128)[0]
         
         if head - tail >= 1024:
             raise RuntimeError("Buffer full")
             
         index = head % 1024
-        task_offset = 144 + index * 4752
+        task_offset = 65856 + index * 4752
         
         struct.pack_into("I", mv, task_offset + 0, op_code)
         struct.pack_into("Q", mv, task_offset + 8, device_id)

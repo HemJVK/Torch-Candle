@@ -1,6 +1,6 @@
 [project]
 name = "torch_candle"
-version = "2026.6.2"
+version = "2026.6.3"
 description = "A PyTorch-compatible API with Candle backend"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -25,11 +25,34 @@ requires = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]
-features = ["pyo3/extension-module", "cuda"]
+# Default build = CPU-only (no CUDA/Metal bundled).
+# To build the CUDA wheel separately, run:
+#   maturin build --release --features cuda
+features = ["pyo3/extension-module"]
 module-name = "torch_candle_backend"
 manifest-path = "rust/Cargo.toml"
 python-packages = ["torch_candle"]
 sdist-include = ["LICENSE"]
+# Strip debug symbols from the final .so — cuts size by ~30–40%
+strip = true
+# Skip bundling system CUDA/ROCm libs; users install those via their
+# CUDA toolkit. This keeps the wheel under PyPI's 100 MB limit.
+skip-auditwheel = false
+# Libs that should NEVER be bundled into the wheel even if auditwheel
+# detects them as non-manylinux (avoids bundling the 500+ MB CUDA stack).
+auditwheel-exclude = [
+    "libcuda",
+    "libcudart",
+    "libcublas",
+    "libcublasLt",
+    "libcurand",
+    "libcusolver",
+    "libcusparse",
+    "libcufft",
+    "libamdhip64",
+    "librocblas",
+    "librocsolver",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
