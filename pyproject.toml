@@ -1,6 +1,6 @@
 [project]
 name = "torch-candle"
-version = "2026.6.7"
+version = "2026.6.8"
 description = "A PyTorch-compatible API with Candle backend"
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -86,6 +86,14 @@ class Tensor(metaclass=TensorMeta):
         Tensor._id_counter += 1
         self._id = Tensor._id_counter
 
+        if self._device == "cuda":
+            try:
+                from torch_candle.cuda import _allocator
+                size = self.numel() * 4
+                self._cuda_ptr = _allocator.allocate(size, 0, f"tensor_{self._id}")
+            except Exception:
+                pass
+
     @classmethod
     def _fast_wrap(cls, rust_tensor, dtype="float32"):
         """Internal fast construction bypassing __init__ overhead."""
@@ -103,6 +111,14 @@ class Tensor(metaclass=TensorMeta):
             Tensor._id_counter = 0
         Tensor._id_counter += 1
         obj._id = Tensor._id_counter
+
+        if obj._device == "cuda":
+            try:
+                from torch_candle.cuda import _allocator
+                size = obj.numel() * 4
+                obj._cuda_ptr = _allocator.allocate(size, 0, f"tensor_fast_{obj._id}")
+            except Exception:
+                pass
 
         return obj
 
@@ -522,8 +538,13 @@ class Tensor(metaclass=TensorMeta):
     def __del__(self):
         try:
             from torch_candle.cuda import _allocator
-            _allocator.free(id(self), 0)
-            _allocator.cuda_free(id(self))
+            ptr = getattr(self, "_cuda_ptr", None)
+            if ptr is not None:
+                _allocator.free(ptr, 0)
+                _allocator.cuda_free(ptr)
+            else:
+                _allocator.free(id(self), 0)
+                _allocator.cuda_free(id(self))
         except Exception:
             pass
         try:

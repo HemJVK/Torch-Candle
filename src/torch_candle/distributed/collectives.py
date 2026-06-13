@@ -35,6 +35,11 @@ def all_reduce(tensor, op="sum", group=None):
     Natively execute a process-safe in-place all-reduce operation over Tensors 
     using dynamically allocated shared memory and lock-free time barriers.
     """
+    import torch_candle_backend as _kernels
+    if hasattr(_kernels, "has_nccl") and _kernels.has_nccl() and getattr(tensor, "device", "cpu") == "cuda":
+        _kernels.nccl_all_reduce(tensor._tensor, op)
+        return tensor
+
     if _world_size <= 1:
         return tensor
         

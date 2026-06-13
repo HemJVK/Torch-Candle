@@ -107,3 +107,14 @@ class standard_mode:
     def __exit__(self, *args):
         Tensor.enable_sha = self.prev
 
+class no_sha:
+    """Context manager to completely bypass/disable Self-Healing Autograd (SHA) Engine."""
+    def __init__(self):
+        self.prev = True
+    def __enter__(self):
+        self.prev = getattr(Tensor, "enable_sha", True)
+        Tensor.enable_sha = False
+        return self
+    def __exit__(self, *args):
+        Tensor.enable_sha = self.prev
+

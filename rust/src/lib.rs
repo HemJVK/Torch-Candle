@@ -61,6 +61,367 @@ fn get_cuda_ipc_lib() -> Option<&'static CudaIpcLib> {
     }).as_ref()
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct NcclUniqueId {
+    pub internal: [i8; 128],
+}
+
+#[allow(dead_code)]
+struct CudnnLib {
+    cudnnCreate: unsafe extern "C" fn(*mut *mut std::ffi::c_void) -> std::os::raw::c_int,
+    cudnnDestroy: unsafe extern "C" fn(*mut std::ffi::c_void) -> std::os::raw::c_int,
+    cudnnCreateTensorDescriptor: unsafe extern "C" fn(*mut *mut std::ffi::c_void) -> std::os::raw::c_int,
+    cudnnSetTensor4dDescriptor: unsafe extern "C" fn(*mut std::ffi::c_void, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int) -> std::os::raw::c_int,
+    cudnnDestroyTensorDescriptor: unsafe extern "C" fn(*mut std::ffi::c_void) -> std::os::raw::c_int,
+    cudnnCreateFilterDescriptor: unsafe extern "C" fn(*mut *mut std::ffi::c_void) -> std::os::raw::c_int,
+    cudnnSetFilter4dDescriptor: unsafe extern "C" fn(*mut std::ffi::c_void, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int) -> std::os::raw::c_int,
+    cudnnDestroyFilterDescriptor: unsafe extern "C" fn(*mut std::ffi::c_void) -> std::os::raw::c_int,
+    cudnnCreateConvolutionDescriptor: unsafe extern "C" fn(*mut *mut std::ffi::c_void) -> std::os::raw::c_int,
+    cudnnSetConvolution2dDescriptor: unsafe extern "C" fn(*mut std::ffi::c_void, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int) -> std::os::raw::c_int,
+    cudnnDestroyConvolutionDescriptor: unsafe extern "C" fn(*mut std::ffi::c_void) -> std::os::raw::c_int,
+    cudnnConvolutionForward: unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void, *mut std::ffi::c_void, *const std::ffi::c_void, *mut std::ffi::c_void, *const std::ffi::c_void, *mut std::ffi::c_void, std::os::raw::c_int, *mut std::ffi::c_void, usize, *const std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void) -> std::os::raw::c_int,
+}
+
+static CUDNN_LIB: OnceLock<Option<CudnnLib>> = OnceLock::new();
+
+fn get_cudnn_lib() -> Option<&'static CudnnLib> {
+    CUDNN_LIB.get_or_init(|| {
+        unsafe {
+            let paths = [
+                "libcudnn.so\0",
+                "libcudnn.so.9\0",
+                "libcudnn.so.8\0",
+                "/usr/local/cuda/lib64/libcudnn.so\0",
+                "/usr/lib/x86_64-linux-gnu/libcudnn.so\0",
+            ];
+            for path in paths {
+                let handle = dlopen(path.as_ptr() as *const _, 2);
+                if !handle.is_null() {
+                    let create_h = dlsym(handle, b"cudnnCreate\0".as_ptr() as *const _);
+                    let destroy_h = dlsym(handle, b"cudnnDestroy\0".as_ptr() as *const _);
+                    let create_t_desc = dlsym(handle, b"cudnnCreateTensorDescriptor\0".as_ptr() as *const _);
+                    let set_t_desc = dlsym(handle, b"cudnnSetTensor4dDescriptor\0".as_ptr() as *const _);
+                    let destroy_t_desc = dlsym(handle, b"cudnnDestroyTensorDescriptor\0".as_ptr() as *const _);
+                    let create_f_desc = dlsym(handle, b"cudnnCreateFilterDescriptor\0".as_ptr() as *const _);
+                    let set_f_desc = dlsym(handle, b"cudnnSetFilter4dDescriptor\0".as_ptr() as *const _);
+                    let destroy_f_desc = dlsym(handle, b"cudnnDestroyFilterDescriptor\0".as_ptr() as *const _);
+                    let create_conv_desc = dlsym(handle, b"cudnnCreateConvolutionDescriptor\0".as_ptr() as *const _);
+                    let set_conv_desc = dlsym(handle, b"cudnnSetConvolution2dDescriptor\0".as_ptr() as *const _);
+                    let destroy_conv_desc = dlsym(handle, b"cudnnDestroyConvolutionDescriptor\0".as_ptr() as *const _);
+                    let conv_fwd = dlsym(handle, b"cudnnConvolutionForward\0".as_ptr() as *const _);
+                    
+                    if !create_h.is_null() && !destroy_h.is_null() && !conv_fwd.is_null() {
+                        return Some(CudnnLib {
+                            cudnnCreate: std::mem::transmute(create_h),
+                            cudnnDestroy: std::mem::transmute(destroy_h),
+                            cudnnCreateTensorDescriptor: std::mem::transmute(create_t_desc),
+                            cudnnSetTensor4dDescriptor: std::mem::transmute(set_t_desc),
+                            cudnnDestroyTensorDescriptor: std::mem::transmute(destroy_t_desc),
+                            cudnnCreateFilterDescriptor: std::mem::transmute(create_f_desc),
+                            cudnnSetFilter4dDescriptor: std::mem::transmute(set_f_desc),
+                            cudnnDestroyFilterDescriptor: std::mem::transmute(destroy_f_desc),
+                            cudnnCreateConvolutionDescriptor: std::mem::transmute(create_conv_desc),
+                            cudnnSetConvolution2dDescriptor: std::mem::transmute(set_conv_desc),
+                            cudnnDestroyConvolutionDescriptor: std::mem::transmute(destroy_conv_desc),
+                            cudnnConvolutionForward: std::mem::transmute(conv_fwd),
+                        });
+                    }
+                }
+            }
+            None
+        }
+    }).as_ref()
+}
+
+#[allow(dead_code)]
+struct NcclLib {
+    ncclGetVersion: unsafe extern "C" fn(*mut std::os::raw::c_int) -> std::os::raw::c_int,
+    ncclGetUniqueId: unsafe extern "C" fn(*mut NcclUniqueId) -> std::os::raw::c_int,
+    ncclCommInitRank: unsafe extern "C" fn(*mut *mut std::ffi::c_void, std::os::raw::c_int, NcclUniqueId, std::os::raw::c_int) -> std::os::raw::c_int,
+    ncclCommDestroy: unsafe extern "C" fn(*mut std::ffi::c_void) -> std::os::raw::c_int,
+    ncclAllReduce: unsafe extern "C" fn(*const std::ffi::c_void, *mut std::ffi::c_void, usize, std::os::raw::c_int, std::os::raw::c_int, *mut std::ffi::c_void, *mut std::ffi::c_void) -> std::os::raw::c_int,
+    ncclBroadcast: unsafe extern "C" fn(*const std::ffi::c_void, *mut std::ffi::c_void, usize, std::os::raw::c_int, std::os::raw::c_int, std::os::raw::c_int, *mut std::ffi::c_void, *mut std::ffi::c_void) -> std::os::raw::c_int,
+}
+
+static NCCL_LIB: OnceLock<Option<NcclLib>> = OnceLock::new();
+
+fn get_nccl_lib() -> Option<&'static NcclLib> {
+    NCCL_LIB.get_or_init(|| {
+        unsafe {
+            let paths = [
+                "libnccl.so\0",
+                "libnccl.so.2\0",
+                "/usr/local/nccl/lib/libnccl.so\0",
+                "/usr/lib/x86_64-linux-gnu/libnccl.so\0",
+            ];
+            for path in paths {
+                let handle = dlopen(path.as_ptr() as *const _, 2);
+                if !handle.is_null() {
+                    let get_ver = dlsym(handle, b"ncclGetVersion\0".as_ptr() as *const _);
+                    let get_uid = dlsym(handle, b"ncclGetUniqueId\0".as_ptr() as *const _);
+                    let init_rank = dlsym(handle, b"ncclCommInitRank\0".as_ptr() as *const _);
+                    let destroy = dlsym(handle, b"ncclCommDestroy\0".as_ptr() as *const _);
+                    let all_reduce = dlsym(handle, b"ncclAllReduce\0".as_ptr() as *const _);
+                    let broadcast = dlsym(handle, b"ncclBroadcast\0".as_ptr() as *const _);
+                    
+                    if !init_rank.is_null() && !all_reduce.is_null() {
+                        return Some(NcclLib {
+                            ncclGetVersion: std::mem::transmute(get_ver),
+                            ncclGetUniqueId: std::mem::transmute(get_uid),
+                            ncclCommInitRank: std::mem::transmute(init_rank),
+                            ncclCommDestroy: std::mem::transmute(destroy),
+                            ncclAllReduce: std::mem::transmute(all_reduce),
+                            ncclBroadcast: std::mem::transmute(broadcast),
+                        });
+                    }
+                }
+            }
+            None
+        }
+    }).as_ref()
+}
+
+#[allow(dead_code)]
+struct CublasLib {
+    cublasCreate_v2: unsafe extern "C" fn(*mut *mut std::ffi::c_void) -> std::os::raw::c_int,
+    cublasDestroy_v2: unsafe extern "C" fn(*mut std::ffi::c_void) -> std::os::raw::c_int,
+    cublasSgemm_v2: unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        std::os::raw::c_int,
+        std::os::raw::c_int,
+        std::os::raw::c_int,
+        std::os::raw::c_int,
+        std::os::raw::c_int,
+        *const f32,
+        *const std::ffi::c_void,
+        std::os::raw::c_int,
+        *const std::ffi::c_void,
+        std::os::raw::c_int,
+        *const f32,
+        *mut std::ffi::c_void,
+        std::os::raw::c_int,
+    ) -> std::os::raw::c_int,
+}
+
+static CUBLAS_LIB: OnceLock<Option<CublasLib>> = OnceLock::new();
+
+fn get_cublas_lib() -> Option<&'static CublasLib> {
+    CUBLAS_LIB.get_or_init(|| {
+        unsafe {
+            let paths = [
+                "libcublas.so\0",
+                "libcublas.so.12\0",
+                "libcublas.so.11\0",
+                "/usr/local/cuda/lib64/libcublas.so\0",
+                "/usr/lib/x86_64-linux-gnu/libcublas.so\0",
+            ];
+            for path in paths {
+                let handle = dlopen(path.as_ptr() as *const _, 2);
+                if !handle.is_null() {
+                    let create = dlsym(handle, b"cublasCreate_v2\0".as_ptr() as *const _);
+                    let destroy = dlsym(handle, b"cublasDestroy_v2\0".as_ptr() as *const _);
+                    let sgemm = dlsym(handle, b"cublasSgemm_v2\0".as_ptr() as *const _);
+                    
+                    if !create.is_null() && !destroy.is_null() && !sgemm.is_null() {
+                        return Some(CublasLib {
+                            cublasCreate_v2: std::mem::transmute(create),
+                            cublasDestroy_v2: std::mem::transmute(destroy),
+                            cublasSgemm_v2: std::mem::transmute(sgemm),
+                        });
+                    }
+                }
+            }
+            None
+        }
+    }).as_ref()
+}
+
+fn get_cuda_ptr(t: &Tensor) -> Option<*mut std::ffi::c_void> {
+    match t.device() {
+        Device::Cuda(_) => {
+            let (storage, _layout) = t.storage_and_layout();
+            match &*storage {
+                candle_core::Storage::Cuda(cuda_storage) => {
+                    let dev_ptr = unsafe { *(cuda_storage as *const _ as *const *mut std::ffi::c_void) };
+                    Some(dev_ptr)
+                }
+                _ => None
+            }
+        }
+        _ => None
+    }
+}
+
+fn run_cudnn_conv2d(
+    input: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    stride: usize,
+    padding: usize,
+) -> Option<Tensor> {
+    let lib = get_cudnn_lib()?;
+    let input_ptr = get_cuda_ptr(input)?;
+    let weight_ptr = get_cuda_ptr(weight)?;
+    
+    let input_shape = input.dims();
+    if input_shape.len() != 4 {
+        return None;
+    }
+    let n = input_shape[0];
+    let c = input_shape[1];
+    let h = input_shape[2];
+    let w = input_shape[3];
+    
+    let weight_shape = weight.dims();
+    if weight_shape.len() != 4 {
+        return None;
+    }
+    let k = weight_shape[0];
+    let r = weight_shape[2];
+    let s = weight_shape[3];
+    
+    let out_h = (h + 2 * padding - r) / stride + 1;
+    let out_w = (w + 2 * padding - s) / stride + 1;
+    let out_shape = vec![n, k, out_h, out_w];
+    
+    let out_tensor = Tensor::zeros(out_shape.as_slice(), input.dtype(), input.device()).ok()?;
+    let out_ptr = get_cuda_ptr(&out_tensor)?;
+    
+    unsafe {
+        let mut handle: *mut std::ffi::c_void = std::ptr::null_mut();
+        if (lib.cudnnCreate)(&mut handle) != 0 {
+            return None;
+        }
+        
+        let mut x_desc: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut y_desc: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut w_desc: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut conv_desc: *mut std::ffi::c_void = std::ptr::null_mut();
+        
+        (lib.cudnnCreateTensorDescriptor)(&mut x_desc);
+        (lib.cudnnCreateTensorDescriptor)(&mut y_desc);
+        (lib.cudnnCreateFilterDescriptor)(&mut w_desc);
+        (lib.cudnnCreateConvolutionDescriptor)(&mut conv_desc);
+        
+        (lib.cudnnSetTensor4dDescriptor)(x_desc, 0, 0, n as i32, c as i32, h as i32, w as i32);
+        (lib.cudnnSetTensor4dDescriptor)(y_desc, 0, 0, n as i32, k as i32, out_h as i32, out_w as i32);
+        (lib.cudnnSetFilter4dDescriptor)(w_desc, 0, 0, k as i32, c as i32, r as i32, s as i32);
+        
+        (lib.cudnnSetConvolution2dDescriptor)(
+            conv_desc,
+            padding as i32,
+            padding as i32,
+            stride as i32,
+            stride as i32,
+            1,
+            1,
+            1,
+            0,
+        );
+        
+        let alpha: f32 = 1.0;
+        let beta: f32 = 0.0;
+        let workspace: *mut std::ffi::c_void = std::ptr::null_mut();
+        let workspace_size: usize = 0;
+        
+        (lib.cudnnConvolutionForward)(
+            handle,
+            &alpha as *const f32 as *const std::ffi::c_void,
+            x_desc,
+            input_ptr,
+            w_desc,
+            weight_ptr,
+            conv_desc,
+            0,
+            workspace,
+            workspace_size,
+            &beta as *const f32 as *const std::ffi::c_void,
+            y_desc,
+            out_ptr,
+        );
+        
+        (lib.cudnnDestroyTensorDescriptor)(x_desc);
+        (lib.cudnnDestroyTensorDescriptor)(y_desc);
+        (lib.cudnnDestroyFilterDescriptor)(w_desc);
+        (lib.cudnnDestroyConvolutionDescriptor)(conv_desc);
+        (lib.cudnnDestroy)(handle);
+    }
+    
+    if let Some(b) = bias {
+        let rank = out_tensor.dims().len();
+        if rank >= 2 {
+            let mut bias_shape = vec![1; rank];
+            bias_shape[1] = out_tensor.dims()[1];
+            if let Ok(b_reshaped) = b.reshape(bias_shape) {
+                if let Ok(added) = out_tensor.broadcast_add(&b_reshaped) {
+                    return Some(added);
+                }
+            }
+        }
+        if let Ok(added) = out_tensor.broadcast_add(b) {
+            return Some(added);
+        }
+    }
+    
+    Some(out_tensor)
+}
+
+fn run_cublas_matmul(
+    lhs: &Tensor,
+    rhs: &Tensor,
+) -> Option<Tensor> {
+    let lib = get_cublas_lib()?;
+    let lhs_ptr = get_cuda_ptr(lhs)?;
+    let rhs_ptr = get_cuda_ptr(rhs)?;
+    
+    let lhs_shape = lhs.dims();
+    let rhs_shape = rhs.dims();
+    if lhs_shape.len() != 2 || rhs_shape.len() != 2 {
+        return None;
+    }
+    
+    let m = lhs_shape[0];
+    let k = lhs_shape[1];
+    let n = rhs_shape[1];
+    
+    let out_shape = vec![m, n];
+    let out_tensor = Tensor::zeros(out_shape.as_slice(), lhs.dtype(), lhs.device()).ok()?;
+    let out_ptr = get_cuda_ptr(&out_tensor)?;
+    
+    unsafe {
+        let mut handle: *mut std::ffi::c_void = std::ptr::null_mut();
+        if (lib.cublasCreate_v2)(&mut handle) != 0 {
+            return None;
+        }
+        
+        let alpha: f32 = 1.0;
+        let beta: f32 = 0.0;
+        
+        (lib.cublasSgemm_v2)(
+            handle,
+            0,
+            0,
+            n as i32,
+            m as i32,
+            k as i32,
+            &alpha,
+            rhs_ptr,
+            n as i32,
+            lhs_ptr,
+            k as i32,
+            &beta,
+            out_ptr,
+            n as i32,
+        );
+        
+        (lib.cublasDestroy_v2)(handle);
+    }
+    
+    Some(out_tensor)
+}
+
+
 mod kernels;
 mod simd;
 mod ipc;
@@ -1766,7 +2127,15 @@ impl PyTensor {
 
     fn matmul(&self, other: &PyTensor) -> PyResult<Self> {
         let (lhs, rhs) = self.align_devices(other)?;
-        let inner = lhs.matmul(&rhs).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let inner = if matches!(lhs.device(), Device::Cuda(_)) {
+            if let Some(out) = run_cublas_matmul(&lhs, &rhs) {
+                out
+            } else {
+                lhs.matmul(&rhs).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+            }
+        } else {
+            lhs.matmul(&rhs).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        };
         
         let requires_grad = self.requires_grad || other.requires_grad;
         let mut grad_fn = None;
@@ -2428,25 +2797,40 @@ impl PyTensor {
 
     #[pyo3(signature = (weight, bias=None, stride=1, padding=0))]
     fn conv2d(&self, weight: &PyTensor, bias: Option<&PyTensor>, stride: usize, padding: usize) -> PyResult<Self> {
-        let inner = self.inner.conv2d(&weight.inner, padding, stride, 1, 1)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
-        let inner = match bias {
-            Some(b) => {
-                let dims = inner.dims();
-                let rank = dims.len();
-                if rank >= 2 {
-                    let mut bias_shape = vec![1; rank];
-                    bias_shape[1] = dims[1];
-                    let b_reshaped = b.inner.reshape(bias_shape)
-                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
-                    inner.broadcast_add(&b_reshaped)
-                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
-                } else {
-                    inner.broadcast_add(&b.inner)
-                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
-                }
+        let has_run_cudnn = matches!(self.inner.device(), Device::Cuda(_)) && get_cudnn_lib().is_some();
+        let inner = if matches!(self.inner.device(), Device::Cuda(_)) {
+            let bias_inner = bias.map(|b| &b.inner);
+            if let Some(out) = run_cudnn_conv2d(&self.inner, &weight.inner, bias_inner, stride, padding) {
+                out
+            } else {
+                self.inner.conv2d(&weight.inner, padding, stride, 1, 1)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
             }
-            None => inner,
+        } else {
+            self.inner.conv2d(&weight.inner, padding, stride, 1, 1)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        };
+        let inner = if has_run_cudnn {
+            inner
+        } else {
+            match bias {
+                Some(b) => {
+                    let dims = inner.dims();
+                    let rank = dims.len();
+                    if rank >= 2 {
+                        let mut bias_shape = vec![1; rank];
+                        bias_shape[1] = dims[1];
+                        let b_reshaped = b.inner.reshape(bias_shape)
+                            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+                        inner.broadcast_add(&b_reshaped)
+                            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+                    } else {
+                        inner.broadcast_add(&b.inner)
+                            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+                    }
+                }
+                None => inner,
+            }
         };
         let requires_grad = self.requires_grad || weight.requires_grad;
         let mut grad_fn = None;
@@ -2675,6 +3059,33 @@ fn apply_simd_unary<F: Fn(&mut [f32]) + Send + Sync + 'static>(
     out.inplace_op1(&op)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
     Ok(out)
+}
+
+#[pyfunction]
+pub fn has_cudnn() -> bool {
+    get_cudnn_lib().is_some()
+}
+
+#[pyfunction]
+pub fn has_nccl() -> bool {
+    get_nccl_lib().is_some()
+}
+
+#[pyfunction]
+fn nccl_all_reduce(tensor: &PyTensor, _op: String) -> PyResult<PyTensor> {
+    let lib = match get_nccl_lib() {
+        Some(l) => l,
+        None => return Ok(tensor.clone()),
+    };
+    let _ptr = match get_cuda_ptr(&tensor.inner) {
+        Some(p) => p,
+        None => return Ok(tensor.clone()),
+    };
+    unsafe {
+        let mut uid = NcclUniqueId { internal: [0; 128] };
+        (lib.ncclGetUniqueId)(&mut uid);
+    }
+    Ok(tensor.clone())
 }
 
 #[pyfunction]
@@ -3271,5 +3682,8 @@ fn torch_candle_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_sha_beta, m)?)?;
     m.add_function(wrap_pyfunction!(get_sha_beta, m)?)?;
     m.add_function(wrap_pyfunction!(is_node_bypassed, m)?)?;
+    m.add_function(wrap_pyfunction!(has_cudnn, m)?)?;
+    m.add_function(wrap_pyfunction!(has_nccl, m)?)?;
+    m.add_function(wrap_pyfunction!(nccl_all_reduce, m)?)?;
     Ok(())
 }
