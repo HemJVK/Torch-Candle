@@ -48,7 +48,26 @@ Combined with **Swish activation gating** and **Dense Representation Reuse (DRR)
 
 ## 🛠️ Installation
 
-### Prerequisite: Rust Toolchain
+### 📦 Pre-compiled PyPI Packages (Recommended for End-Users)
+If you want to run Torch-Candle without compiling it from source, install the pre-compiled binaries:
+
+*   **CPU / macOS Metal (Apple Silicon)**:
+    ```bash
+    pip install torch-candle
+    ```
+    *(Note: Apple Silicon users automatically get Metal GPU acceleration out-of-the-box).*
+
+*   **NVIDIA CUDA (Includes CPU + GPU acceleration)**:
+    ```bash
+    pip install torch-candle-cuda
+    ```
+
+---
+
+### 🛠️ Building from Source (Local Compilation)
+If you are developing or compiling specifically for your machine's hardware architecture, follow the instructions below.
+
+#### Prerequisite: Rust Toolchain
 Since Torch-Candle compiles native C++/Rust kernels during installation, ensure the Rust toolchain is installed:
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -65,25 +84,36 @@ uv pip install torch-candle
 ```
 
 #### 2. NVIDIA CUDA Acceleration (NVIDIA GPUs)
-Ensure the CUDA Toolkit is installed and `nvcc` is available in your `PATH`.
-*   **From a local git clone**:
+Ensure the CUDA Toolkit is installed and `nvcc` is available in your `PATH` or standard location (e.g. `/usr/local/cuda`).
+*   **From a local git clone (Recommended)**:
+    We provide an automated hardware detection and installation script that configures CUDA paths and queries your GPU's exact compute capability automatically:
     ```bash
-    CUDA_HOME=/usr/local/cuda CUDA_COMPUTE_CAP=75 MATURIN_FEATURES="cuda" uv pip install --force-reinstall -e .
+    # Standard installation
+    python install.py
+
+    # Editable installation (for active development)
+    python install.py -e
+    ```
+*   **From PyPI (forcing a custom source build)**:
+    If installing directly from PyPI without cloning, you can still compile with CUDA support manually:
+    ```bash
+    CUDA_HOME=/usr/local/cuda CUDA_PATH=/usr/local/cuda CUDA_COMPUTE_CAP=75 MATURIN_PEP517_ARGS="--features pyo3/extension-module,cuda" uv pip install --force-reinstall --no-cache torch-candle --no-binary torch-candle
     ```
     *(Note: Set `CUDA_COMPUTE_CAP` to match your GPU architecture, e.g., `89` for Ada Lovelace, `80` for Ampere, `75` for Turing/GTX 1650).*
-*   **From PyPI (forcing a custom source build)**:
-    ```bash
-    MATURIN_FEATURES="cuda" uv pip install torch-candle --no-binary torch-candle
-    ```
 
 #### 3. Apple Silicon GPU / Metal (macOS)
-*   **From a local git clone**:
+*   **From a local git clone (Recommended)**:
+    The installer script automatically detects macOS and enables Metal and Accelerate features:
     ```bash
-    MATURIN_FEATURES="metal,accelerate" uv pip install --force-reinstall -e .
+    # Standard installation
+    python install.py
+
+    # Editable installation (for active development)
+    python install.py -e
     ```
 *   **From PyPI (forcing a custom source build)**:
     ```bash
-    MATURIN_FEATURES="metal,accelerate" uv pip install torch-candle --no-binary torch-candle
+    MATURIN_PEP517_ARGS="--features pyo3/extension-module,metal,accelerate" uv pip install --force-reinstall --no-cache torch-candle --no-binary torch-candle
     ```
 
 ---
@@ -92,10 +122,10 @@ Ensure the CUDA Toolkit is installed and `nvcc` is available in your `PATH`.
 Standard `pip` supports the exact same build variables by forcing a source distribution build:
 ```bash
 # NVIDIA CUDA
-MATURIN_FEATURES="cuda" pip install torch-candle --no-binary torch-candle
+CUDA_HOME=/usr/local/cuda CUDA_PATH=/usr/local/cuda CUDA_COMPUTE_CAP=75 MATURIN_PEP517_ARGS="--features pyo3/extension-module,cuda" pip install --force-reinstall --no-cache-dir torch-candle --no-binary torch-candle
 
 # Apple Silicon GPU
-MATURIN_FEATURES="metal,accelerate" pip install torch-candle --no-binary torch-candle
+MATURIN_PEP517_ARGS="--features pyo3/extension-module,metal,accelerate" pip install --force-reinstall --no-cache-dir torch-candle --no-binary torch-candle
 ```
 
 ---
