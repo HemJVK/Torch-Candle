@@ -36,18 +36,28 @@ class ScriptModule:
         self.recorded_shapes = None
         self.compiler = _kernels.SSACompiler()
         self.compiler.compile_and_optimize()
+        self.device_alignment_map = {}
         
     def __call__(self, *args, **kwargs):
         current_shapes = [tuple(a.shape) if hasattr(a, "shape") else None for a in args]
         if self.recorded_shapes is None:
             self.recorded_shapes = current_shapes
+            self.device_alignment_map["input_devices"] = [getattr(a, "device", None) for a in args]
         elif current_shapes != self.recorded_shapes:
             raise RuntimeError(
                 f"Zero-Fallback Mandate Violation: Dynamic shape detected in ScriptModule "
                 f"(expected {self.recorded_shapes}, got {current_shapes}). Fallback to eager mode is prohibited."
             )
             
-        return self._obj(*args, **kwargs)
+        aligned_args = []
+        cached_devices = self.device_alignment_map.get("input_devices", [])
+        for arg, cached_dev in zip(args, cached_devices):
+            if hasattr(arg, "to") and cached_dev is not None:
+                aligned_args.append(arg.to(cached_dev))
+            else:
+                aligned_args.append(arg)
+                
+        return self._obj(*aligned_args, **kwargs)
         
     def save(self, filepath):
         with open(filepath, "wb") as f:

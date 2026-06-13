@@ -222,6 +222,14 @@ python train.py
 
 > **Note:** Do **not** use `sysctl` or modify `/etc/sysctl.conf` for memory tuning — this requires root privileges and targets the wrong kernel parameter.
 
+## 🐳 Docker IPC Requirement (Multiprocessing)
+For Torch-Candle's Zero-Copy IPC Shared Memory pipeline to work correctly within Docker containers, you must run the container with the host's IPC namespace. This allows the processes inside the container to mount the host's `/dev/shm` segment.
+
+Pass the `--ipc=host` flag when running your Docker container:
+```bash
+docker run --gpus all --ipc=host -it my-torch-candle-app
+```
+
 ---
 
 ## 📄 License

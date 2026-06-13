@@ -35,9 +35,26 @@ def reduce_tensor(t):
 
 def reconstruct_tensor(shm_name, shape, dtype, requires_grad):
     """Attach to the shared memory segment in the receiving process and wrap in a zero-copy Tensor."""
+    from multiprocessing.shared_memory import SharedMemory
+    from multiprocessing import resource_tracker
+    
     shm = SharedMemory(name=shm_name)
+    try:
+        resource_tracker.unregister(shm._name, "shared_memory")
+    except Exception:
+        pass
+        
     arr = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
     
     t = Tensor(arr, dtype=dtype, requires_grad=requires_grad)
     t._shm = shm
+    t._shm_creator = False
+    
+    # Unlink immediately after attachment so that the segment is cleaned up
+    # when all processes close their references, preventing leaks.
+    try:
+        shm.unlink()
+    except Exception:
+        pass
+        
     return t

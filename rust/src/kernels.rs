@@ -11,6 +11,15 @@ use std::arch::aarch64::*;
 
 // ─── Element-wise ops ────────────────────────────────────────────────────────
 
+#[cfg(target_arch = "x86_64")]
+extern "C" {
+    fn cblas_sdot(n: i32, x: *const f32, incx: i32, y: *const f32, incy: i32) -> f32;
+    fn cblas_sscal(n: i32, alpha: f32, x: *mut f32, incx: i32);
+    fn vsExp(n: i32, a: *const f32, y: *mut f32);
+    fn vsTanh(n: i32, a: *const f32, y: *mut f32);
+    fn vsInv(n: i32, a: *const f32, y: *mut f32);
+}
+
 pub fn fast_relu(mut x: ArrayViewMutD<'_, f32>) {
     let data = x.as_slice_mut().expect("contiguous");
     unsafe { simd_relu_slice(data); }
@@ -18,6 +27,11 @@ pub fn fast_relu(mut x: ArrayViewMutD<'_, f32>) {
 
 pub fn fast_exp(mut x: ArrayViewMutD<'_, f32>) {
     let data = x.as_slice_mut().expect("contiguous");
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        vsExp(data.len() as i32, data.as_ptr(), data.as_mut_ptr());
+    }
+    #[cfg(not(target_arch = "x86_64"))]
     unsafe { simd_exp_slice(data); }
 }
 
@@ -33,11 +47,25 @@ pub fn fast_sqrt(mut x: ArrayViewMutD<'_, f32>) {
 
 pub fn fast_sigmoid(mut x: ArrayViewMutD<'_, f32>) {
     let data = x.as_slice_mut().expect("contiguous");
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        let n = data.len() as i32;
+        cblas_sscal(n, -1.0, data.as_mut_ptr(), 1);
+        vsExp(n, data.as_ptr(), data.as_mut_ptr());
+        data.par_iter_mut().for_each(|val| *val += 1.0);
+        vsInv(n, data.as_ptr(), data.as_mut_ptr());
+    }
+    #[cfg(not(target_arch = "x86_64"))]
     unsafe { simd_sigmoid_slice(data); }
 }
 
 pub fn fast_tanh(mut x: ArrayViewMutD<'_, f32>) {
     let data = x.as_slice_mut().expect("contiguous");
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        vsTanh(data.len() as i32, data.as_ptr(), data.as_mut_ptr());
+    }
+    #[cfg(not(target_arch = "x86_64"))]
     unsafe { simd_tanh_slice(data); }
 }
 
@@ -56,43 +84,10 @@ pub fn fast_gelu(mut x: ArrayViewMutD<'_, f32>) {
 pub fn fast_sum_all(data: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        const PAR_THRESH: usize = 4 * 1024 * 1024;
-        if data.len() <= PAR_THRESH {
-            unsafe {
-                let mut acc0 = _mm256_setzero_ps();
-                let mut acc1 = _mm256_setzero_ps();
-                let mut acc2 = _mm256_setzero_ps();
-                let mut acc3 = _mm256_setzero_ps();
-                let mut i = 0;
-                while i + 32 <= data.len() {
-                    acc0 = _mm256_add_ps(acc0, _mm256_loadu_ps(data.as_ptr().add(i)));
-                    acc1 = _mm256_add_ps(acc1, _mm256_loadu_ps(data.as_ptr().add(i + 8)));
-                    acc2 = _mm256_add_ps(acc2, _mm256_loadu_ps(data.as_ptr().add(i + 16)));
-                    acc3 = _mm256_add_ps(acc3, _mm256_loadu_ps(data.as_ptr().add(i + 24)));
-                    i += 32;
-                }
-                while i + 8 <= data.len() {
-                    acc0 = _mm256_add_ps(acc0, _mm256_loadu_ps(data.as_ptr().add(i)));
-                    i += 8;
-                }
-                let acc = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
-                let mut buf = [0.0f32; 8];
-                _mm256_storeu_ps(buf.as_mut_ptr(), acc);
-                buf.iter().sum::<f32>() + data[i..].iter().sum::<f32>()
-            }
-        } else {
-            let chunk_sums: Vec<f32> = data.par_chunks(65536).map(|chunk| unsafe {
-                let mut acc = _mm256_setzero_ps();
-                let mut i = 0;
-                while i + 8 <= chunk.len() {
-                    acc = _mm256_add_ps(acc, _mm256_loadu_ps(chunk.as_ptr().add(i)));
-                    i += 8;
-                }
-                let mut buf = [0.0f32; 8];
-                _mm256_storeu_ps(buf.as_mut_ptr(), acc);
-                buf.iter().sum::<f32>() + chunk[i..].iter().sum::<f32>()
-            }).collect();
-            chunk_sums.iter().sum()
+        let n = data.len() as i32;
+        let one = 1.0f32;
+        unsafe {
+            cblas_sdot(n, data.as_ptr(), 1, &one, 0)
         }
     }
     #[cfg(target_arch = "aarch64")]

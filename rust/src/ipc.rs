@@ -526,6 +526,7 @@ impl Drop for SPSCRingBuffer {
             unsafe {
                 if self.is_mmap {
                     libc::munmap(self.raw_ptr as *mut libc::c_void, std::mem::size_of::<SPSCRingBufferLayout>());
+                    libc::unlink(b"/dev/shm/torch_candle_ipc\0".as_ptr() as *const libc::c_char);
                 } else {
                     let layout = std::alloc::Layout::new::<SPSCRingBufferLayout>();
                     std::alloc::dealloc(self.raw_ptr as *mut u8, layout);

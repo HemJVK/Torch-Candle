@@ -98,4 +98,15 @@ fn main() {
     } else {
         println!("cargo:warning=⚠️ [hipcc Build] hipcc compiler not found in PATH. Skipping AOT AMD compilation.");
     }
+
+    // Link MKL and OpenMP
+    let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let workspace_root = manifest_dir.parent().unwrap();
+    let venv_lib = workspace_root.join(".venv").join("lib");
+    println!("cargo:rustc-link-search=native={}", venv_lib.display());
+    println!("cargo:rustc-link-lib=dylib=mkl_rt");
+    println!("cargo:rustc-link-lib=dylib=iomp5");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", venv_lib.display());
+    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../../../../");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../../../../.venv/lib");
 }

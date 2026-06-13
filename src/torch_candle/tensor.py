@@ -30,7 +30,7 @@ class Tensor(metaclass=TensorMeta):
     """torch_candle.Tensor — thin wrapper around candle.Tensor (Rust via PyO3).
     """
 
-    __slots__ = ['_tensor', '_device', '_dtype', '_shape', '_id', '_shm', '_grad_history_list']
+    __slots__ = ['_tensor', '_device', '_dtype', '_shape', '_id', '_shm', '_shm_creator', '_grad_history_list']
 
     _grad_enabled = True  # toggled by torch.no_grad()
 
@@ -78,6 +78,7 @@ class Tensor(metaclass=TensorMeta):
         self._shape = tuple(self._tensor.shape)
 
         self._shm = None
+        self._shm_creator = False
 
         # Unique ID for graph compiler tracing
         if not hasattr(Tensor, "_id_counter"):
@@ -95,6 +96,7 @@ class Tensor(metaclass=TensorMeta):
         obj._shape = tuple(rust_tensor.shape)
 
         obj._shm = None
+        obj._shm_creator = False
 
         # Unique ID for graph compiler tracing
         if not hasattr(Tensor, "_id_counter"):
@@ -524,6 +526,11 @@ class Tensor(metaclass=TensorMeta):
             _allocator.cuda_free(id(self))
         except Exception:
             pass
+        try:
+            if hasattr(self, "_shm") and self._shm is not None:
+                self._shm.close()
+        except Exception:
+            pass
 
     def detach(self):
         return Tensor(self.numpy(), device=self.device, dtype=self.dtype, requires_grad=False)
@@ -616,11 +623,13 @@ class Tensor(metaclass=TensorMeta):
         self._dtype = "float32"
         self._shape = tuple(self._tensor.shape)
         self._shm = None
+        self._shm_creator = False
 
     def share_memory_(self):
         if self.is_shared():
             return self
         from multiprocessing.shared_memory import SharedMemory
+        from multiprocessing import resource_tracker
         import numpy as np
         import torch_candle_backend as _kernels
         
@@ -629,6 +638,12 @@ class Tensor(metaclass=TensorMeta):
         
         shm = SharedMemory(create=True, size=size)
         self._shm = shm
+        self._shm_creator = True
+        
+        try:
+            resource_tracker.unregister(shm._name, "shared_memory")
+        except Exception:
+            pass
         
         arr = np.ndarray(self.shape, dtype=self.dtype, buffer=shm.buf)
         arr[:] = self.numpy()[:]

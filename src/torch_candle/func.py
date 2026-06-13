@@ -272,30 +272,8 @@ def grad(func, argnums=0):
             if res is None:
                 res = Tensor([0.0], device=x.device)
                 
-            # Self-healing Autograd EMA logic
-            from torch_candle import get_disable_ema_estimates
-            disable_ema = get_disable_ema_estimates()
-            
-            import numpy as np
-            res_np = res.numpy()
-            has_anomaly = np.isnan(res_np).any() or np.isinf(res_np).any()
-            
-            if not hasattr(x, "_grad_history_list") or getattr(x, "_grad_history_list", None) is None:
-                x._grad_history_list = []
-                
-            if getattr(Tensor, "enable_sha", True) and not disable_ema:
-                if has_anomaly:
-                    if x._grad_history_list:
-                        # Read beta from Rust backend — configured via set_sha_beta()
-                        beta = _kernels.get_sha_beta()
-                        g_prev = x._grad_history_list[-1]
-                        res = g_prev * beta
-                        x._grad_history_list.append(res)
-                else:
-                    x._grad_history_list.append(res)
-            elif not has_anomaly:
-                x._grad_history_list.append(res)
-                
+            # Self-healing Autograd EMA logic is handled natively in Rust during backward()
+            # The backend reads beta via _kernels.get_sha_beta() to perform anomaly healing.
             return res
     return wrapped
 
