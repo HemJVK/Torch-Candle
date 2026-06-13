@@ -101,12 +101,52 @@ fn main() {
 
     // Link MKL and OpenMP
     let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let workspace_root = manifest_dir.parent().unwrap();
-    let venv_lib = workspace_root.join(".venv").join("lib");
-    println!("cargo:rustc-link-search=native={}", venv_lib.display());
+    
+    // Find a directory containing libmkl_rt.so
+    let mut mkl_search_paths = vec![
+        std::path::PathBuf::from("/home/hem/personal/Library/Torch-Candle/.venv/lib"),
+        std::path::PathBuf::from("/usr/lib/x86_64-linux-gnu"),
+        std::path::PathBuf::from("/usr/local/lib"),
+        std::path::PathBuf::from("/usr/lib"),
+    ];
+
+    if let Some(parent) = manifest_dir.parent() {
+        mkl_search_paths.push(parent.join(".venv").join("lib"));
+        if let Some(grandparent) = parent.parent() {
+            mkl_search_paths.push(grandparent.join(".venv").join("lib"));
+        }
+    }
+
+    if let Ok(pwd) = std::env::var("PWD") {
+        let pwd_path = std::path::PathBuf::from(pwd);
+        mkl_search_paths.push(pwd_path.join(".venv").join("lib"));
+        mkl_search_paths.push(pwd_path.join("..").join(".venv").join("lib"));
+        mkl_search_paths.push(pwd_path.join("..").join("Torch-Candle").join(".venv").join("lib"));
+        mkl_search_paths.push(pwd_path.join("..").join("..").join("Torch-Candle").join(".venv").join("lib"));
+        mkl_search_paths.push(pwd_path.join("..").join("..").join(".venv").join("lib"));
+    }
+
+    if let Ok(conda) = std::env::var("CONDA_PREFIX") {
+        mkl_search_paths.push(std::path::PathBuf::from(conda).join("lib"));
+    }
+
+    // Find the first path that actually contains libmkl_rt.so
+    let mut found_path = None;
+    for path in &mkl_search_paths {
+        if path.join("libmkl_rt.so").exists() {
+            found_path = Some(path.clone());
+            break;
+        }
+    }
+
+    let final_mkl_path = found_path.unwrap_or_else(|| {
+        manifest_dir.parent().unwrap().join(".venv").join("lib")
+    });
+
+    println!("cargo:rustc-link-search=native={}", final_mkl_path.display());
     println!("cargo:rustc-link-lib=dylib=mkl_rt");
     println!("cargo:rustc-link-lib=dylib=iomp5");
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", venv_lib.display());
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", final_mkl_path.display());
     println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../../../../");
     println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../../../../.venv/lib");
 }
