@@ -655,7 +655,6 @@ class Tensor(metaclass=TensorMeta):
         if self.is_shared():
             return self
         from multiprocessing.shared_memory import SharedMemory
-        from multiprocessing import resource_tracker
         import numpy as np
         import torch_candle_backend as _kernels
         
@@ -665,11 +664,6 @@ class Tensor(metaclass=TensorMeta):
         shm = SharedMemory(create=True, size=size)
         self._shm = shm
         self._shm_creator = True
-        
-        try:
-            resource_tracker.unregister(shm._name, "shared_memory")
-        except Exception:
-            pass
         
         arr = np.ndarray(self.shape, dtype=self.dtype, buffer=shm.buf)
         arr[:] = self.numpy()[:]
