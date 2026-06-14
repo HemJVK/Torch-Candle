@@ -352,7 +352,7 @@ wheels = [
 
 [[package]]
 name = "torch-candle"
-version = "2026.6.13"
+version = "2026.6.14"
 source = { editable = "." }
 dependencies = [
     { name = "ninja" },

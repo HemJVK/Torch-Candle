@@ -7,7 +7,7 @@ from .loss import MSELoss, CrossEntropyLoss, L1Loss, BCELoss, BCEWithLogitsLoss
 from .conv import Conv2d
 from .pooling import MaxPool2d, AvgPool2d, AdaptiveAvgPool2d, AdaptiveMaxPool2d
 from .container import Sequential
-from .dllt import DLLTASModel
+from .dllt import DLLTASModel, dllt_solve
 from . import functional
 
 from .modules.normalization import BatchNorm1d, BatchNorm2d, LayerNorm, GroupNorm

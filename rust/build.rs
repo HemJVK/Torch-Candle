@@ -103,13 +103,41 @@ fn main() {
     if std::env::var("CARGO_FEATURE_MKL").is_ok() {
         let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
         
-        // Find a directory containing libmkl_rt.so
-        let mut mkl_search_paths = vec![
+        let mut mkl_search_paths = Vec::new();
+
+        // 1. Prioritize paths from the environment variable LIB
+        if let Ok(lib_env) = std::env::var("LIB") {
+            for path_str in lib_env.split(|c| c == ':' || c == ';') {
+                if !path_str.is_empty() {
+                    mkl_search_paths.push(std::path::PathBuf::from(path_str));
+                }
+            }
+        }
+
+        // 2. Prioritize paths derived from CMAKE_INCLUDE_PATH (map /include -> /lib)
+        if let Ok(cmake_include) = std::env::var("CMAKE_INCLUDE_PATH") {
+            for path_str in cmake_include.split(|c| c == ':' || c == ';') {
+                if !path_str.is_empty() {
+                    let include_path = std::path::PathBuf::from(path_str);
+                    mkl_search_paths.push(include_path.clone());
+                    if let Some(parent) = include_path.parent() {
+                        mkl_search_paths.push(parent.join("lib"));
+                    }
+                    if path_str.contains("include") {
+                        let lib_str = path_str.replace("include", "lib");
+                        mkl_search_paths.push(std::path::PathBuf::from(lib_str));
+                    }
+                }
+            }
+        }
+
+        // 3. Fallback/default search paths
+        mkl_search_paths.extend(vec![
             std::path::PathBuf::from("/home/hem/personal/Library/Torch-Candle/.venv/lib"),
             std::path::PathBuf::from("/usr/lib/x86_64-linux-gnu"),
             std::path::PathBuf::from("/usr/local/lib"),
             std::path::PathBuf::from("/usr/lib"),
-        ];
+        ]);
 
         if let Some(parent) = manifest_dir.parent() {
             mkl_search_paths.push(parent.join(".venv").join("lib"));
@@ -129,6 +157,14 @@ fn main() {
 
         if let Ok(conda) = std::env::var("CONDA_PREFIX") {
             mkl_search_paths.push(std::path::PathBuf::from(conda).join("lib"));
+        }
+
+        // Output search path directions for every path that exists to support multi-directory layouts (MKL vs OpenMP)
+        for path in &mkl_search_paths {
+            if path.exists() {
+                println!("cargo:rustc-link-search=native={}", path.display());
+                println!("cargo:rustc-link-arg=-Wl,-rpath,{}", path.display());
+            }
         }
 
         // Find the first path that actually contains libmkl_rt.so

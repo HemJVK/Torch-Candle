@@ -3,6 +3,49 @@ import torch_candle as torch
 import torch_candle.nn as nn
 import torch_candle.nn.functional as F
 
+def dllt_solve(X: torch.Tensor, Y: torch.Tensor, lam: float) -> torch.Tensor:
+    """
+    Direct Linear Least-Squares Tensor Analytical Solver (DLLT-AS).
+    
+    Computes the closed-form Moore-Penrose Pseudo-Inverse (Ridge) projection:
+    W_opt = Y^T X (X^T X + lambda I)^-1
+    
+    Args:
+        X (Tensor): Input feature matrix of shape (num_samples, in_features)
+        Y (Tensor): Target label/one-hot matrix of shape (num_samples, out_classes)
+        lam (float): Regularization factor (lambda)
+        
+    Returns:
+        Tensor: Analytical weight matrix W_opt of shape (out_classes, in_features)
+    """
+    device = X.device
+    if not isinstance(X, torch.Tensor):
+        X = torch.Tensor(X, device=device)
+    if not isinstance(Y, torch.Tensor):
+        Y = torch.Tensor(Y, device=device)
+        
+    n_features = X.shape[1]
+    
+    # Calculate X^T X
+    xtx = X.t().matmul(X)
+    
+    # Create lambda * I
+    eye_np = lam * np.eye(n_features, dtype=np.float32)
+    eye = torch.tensor(eye_np, device=device)
+    
+    # Add regularization
+    reg_xtx = xtx + eye
+    
+    # Compute inverse
+    import torch_candle.linalg as linalg
+    inv_reg_xtx = linalg.inv(reg_xtx)
+    
+    # Compute W_opt = Y^T X (X^T X + lambda I)^-1
+    yt_x = Y.t().matmul(X)
+    W_opt = yt_x.matmul(inv_reg_xtx)
+    
+    return W_opt
+
 class DLLTASModel(nn.Module):
     """
     Decoupled Local Analytical Solving (DLLT-AS) Model.
@@ -37,42 +80,29 @@ class DLLTASModel(nn.Module):
             x (Tensor): Input tensor of shape (num_samples, in_features)
             y (Tensor): Target one-hot classification tensor of shape (num_samples, out_classes)
         """
-        # Convert to numpy arrays to leverage highly optimized C-based LAPACK/BLAS solvers
-        x_np = x.numpy()
-        y_np = y.numpy()
-        
         # --- Layer 1 Analytical Solver ---
-        # Moore-Penrose Pseudo-Inverse solving with ridge regularization
-        reg1 = self.reg * np.eye(x_np.shape[1], dtype=np.float32)
-        W1_base = np.linalg.pinv(x_np.T @ x_np + reg1) @ x_np.T @ y_np
-        # Tile representation to populate hidden state dimension
-        W1 = np.tile(W1_base, (1, self.hidden_dim // self.out_classes))
-        # Assign solved weights directly into the layer Parameter
-        self.fc1.weight = nn.Parameter(torch.tensor(W1.T))
+        W1_base = dllt_solve(x, y, self.reg)
+        W1_base_np = W1_base.numpy()
+        W1_np = np.tile(W1_base_np.T, (1, self.hidden_dim // self.out_classes))
+        self.fc1.weight = nn.Parameter(torch.tensor(W1_np.T, device=x.device))
         
         # Forward pass for Layer 1 activations
         h1 = F.silu(self.fc1(x))
-        h1_np = h1.numpy()
         
         # --- Layer 2 Analytical Solver ---
-        # Concatenate H1 activation with raw input coordinates
-        x2_np = np.concatenate([h1_np, x_np * 0.4], axis=1)
-        reg2 = self.reg * np.eye(x2_np.shape[1], dtype=np.float32)
-        W2_base = np.linalg.pinv(x2_np.T @ x2_np + reg2) @ x2_np.T @ y_np
-        W2 = np.tile(W2_base, (1, self.hidden_dim // self.out_classes))
-        self.fc2.weight = nn.Parameter(torch.tensor(W2.T))
+        l2_input = torch.cat([h1, x * 0.4], dim=1)
+        W2_base = dllt_solve(l2_input, y, self.reg)
+        W2_base_np = W2_base.numpy()
+        W2_np = np.tile(W2_base_np.T, (1, self.hidden_dim // self.out_classes))
+        self.fc2.weight = nn.Parameter(torch.tensor(W2_np.T, device=x.device))
         
         # Forward pass for Layer 2 activations
-        l2_input = torch.cat([h1, x * 0.4], dim=1)
         h2 = F.silu(self.fc2(l2_input))
-        h2_np = h2.numpy()
         
         # --- Layer 3 Analytical Solver ---
-        # Concatenate H2 activations, H1 activations, and raw input coordinates
-        x3_np = np.concatenate([h2_np, h1_np, x_np * 0.4], axis=1)
-        reg3 = self.reg * np.eye(x3_np.shape[1], dtype=np.float32)
-        W3 = np.linalg.pinv(x3_np.T @ x3_np + reg3) @ x3_np.T @ y_np
-        self.fc3.weight = nn.Parameter(torch.tensor(W3.T))
+        l3_input = torch.cat([h2, h1, x * 0.4], dim=1)
+        W3 = dllt_solve(l3_input, y, self.reg)
+        self.fc3.weight = nn.Parameter(W3)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

@@ -40,6 +40,11 @@ def main():
     env = os.environ.copy()
     features = ["pyo3/extension-module"]
     
+    force_cuda = False
+    if "--cuda" in sys.argv:
+        force_cuda = True
+        sys.argv.remove("--cuda")
+
     # 4. Detect hardware
     if sys.platform == "darwin":
         print("🍏 macOS detected. Enabling Apple Metal GPU and Accelerate CPU acceleration.")
@@ -54,7 +59,7 @@ def main():
         if not nvcc_path and os.path.exists(os.path.join(cuda_home, "bin/nvcc")):
             nvcc_path = os.path.join(cuda_home, "bin/nvcc")
             
-        if compute_cap or nvcc_path:
+        if compute_cap or nvcc_path or force_cuda:
             print("⚡ NVIDIA GPU detected. Enabling CUDA hardware acceleration.")
             features.append("cuda")
             
@@ -73,7 +78,7 @@ def main():
                 if compute_cap:
                     env["CUDA_COMPUTE_CAP"] = str(compute_cap)
                 else:
-                    env["CUDA_COMPUTE_CAP"] = "75"  # Fallback to Turing/GTX 1650
+                    env["CUDA_COMPUTE_CAP"] = "80"  # Default to Ampere/A100 capability
             
             print(f"   CUDA_HOME:        {env['CUDA_HOME']}")
             print(f"   CUDA_COMPUTE_CAP: {env['CUDA_COMPUTE_CAP']}")

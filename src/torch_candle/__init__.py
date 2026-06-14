@@ -62,6 +62,9 @@ except ImportError: pass
 try: from . import autograd
 except ImportError: pass
 
+try: from . import sha
+except ImportError: pass
+
 try: from . import multiprocessing
 except ImportError: pass
 
