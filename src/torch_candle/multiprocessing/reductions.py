@@ -50,11 +50,4 @@ def reconstruct_tensor(shm_name, shape, dtype, requires_grad):
     t._shm = shm
     t._shm_creator = False
     
-    # Unlink immediately after attachment so that the segment is cleaned up
-    # when all processes close their references, preventing leaks.
-    try:
-        shm.unlink()
-    except Exception:
-        pass
-        
     return t

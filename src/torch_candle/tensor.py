@@ -549,6 +549,11 @@ class Tensor(metaclass=TensorMeta):
             pass
         try:
             if hasattr(self, "_shm") and self._shm is not None:
+                if getattr(self, "_shm_creator", False):
+                    try:
+                        self._shm.unlink()
+                    except Exception:
+                        pass
                 self._shm.close()
         except Exception:
             pass

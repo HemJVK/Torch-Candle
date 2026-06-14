@@ -11,7 +11,7 @@ use std::arch::aarch64::*;
 
 // ─── Element-wise ops ────────────────────────────────────────────────────────
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "mkl"))]
 extern "C" {
     fn cblas_sdot(n: i32, x: *const f32, incx: i32, y: *const f32, incy: i32) -> f32;
     fn cblas_sscal(n: i32, alpha: f32, x: *mut f32, incx: i32);
@@ -27,11 +27,11 @@ pub fn fast_relu(mut x: ArrayViewMutD<'_, f32>) {
 
 pub fn fast_exp(mut x: ArrayViewMutD<'_, f32>) {
     let data = x.as_slice_mut().expect("contiguous");
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "mkl"))]
     unsafe {
         vsExp(data.len() as i32, data.as_ptr(), data.as_mut_ptr());
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(target_arch = "x86_64", feature = "mkl")))]
     unsafe { simd_exp_slice(data); }
 }
 
@@ -47,7 +47,7 @@ pub fn fast_sqrt(mut x: ArrayViewMutD<'_, f32>) {
 
 pub fn fast_sigmoid(mut x: ArrayViewMutD<'_, f32>) {
     let data = x.as_slice_mut().expect("contiguous");
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "mkl"))]
     unsafe {
         let n = data.len() as i32;
         cblas_sscal(n, -1.0, data.as_mut_ptr(), 1);
@@ -55,17 +55,17 @@ pub fn fast_sigmoid(mut x: ArrayViewMutD<'_, f32>) {
         data.par_iter_mut().for_each(|val| *val += 1.0);
         vsInv(n, data.as_ptr(), data.as_mut_ptr());
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(target_arch = "x86_64", feature = "mkl")))]
     unsafe { simd_sigmoid_slice(data); }
 }
 
 pub fn fast_tanh(mut x: ArrayViewMutD<'_, f32>) {
     let data = x.as_slice_mut().expect("contiguous");
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "mkl"))]
     unsafe {
         vsTanh(data.len() as i32, data.as_ptr(), data.as_mut_ptr());
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(target_arch = "x86_64", feature = "mkl")))]
     unsafe { simd_tanh_slice(data); }
 }
 
@@ -82,7 +82,7 @@ pub fn fast_gelu(mut x: ArrayViewMutD<'_, f32>) {
 // ─── Reductions ──────────────────────────────────────────────────────────────
 
 pub fn fast_sum_all(data: &[f32]) -> f32 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "mkl"))]
     {
         let n = data.len() as i32;
         let one = 1.0f32;
@@ -111,8 +111,14 @@ pub fn fast_sum_all(data: &[f32]) -> f32 {
             buf.iter().sum::<f32>() + data[i..].iter().sum::<f32>()
         }
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    { data.iter().sum() }
+    #[cfg(not(any(all(target_arch = "x86_64", feature = "mkl"), target_arch = "aarch64")))]
+    {
+        if data.len() > 131072 {
+            data.par_iter().sum()
+        } else {
+            data.iter().sum()
+        }
+    }
 }
 
 pub fn fast_max_all(data: &[f32]) -> f32 {
